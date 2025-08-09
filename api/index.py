@@ -25,15 +25,22 @@ FIREBASE_AUTH_DOMAIN = f"{FIREBASE_PROJECT_ID}.firebaseapp.com"
 class FirebaseAuth:
     def __init__(self):
         self.api_key = FIREBASE_API_KEY
+        self.auth_url = f"https://identitytoolkit.googleapis.com/v1/accounts"
         self.firestore_url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents"
     
     def store_user_data(self, username, password, uid):
-        """Store username, password and uid in Firestore"""
+        """Store username, password and uid in Firestore with proper authentication"""
         try:
             # Log the attempt for debugging
             logger.info(f"Attempting to store user data for UID: {uid}, Username: {username}")
             
-            result = self._store_user_in_firestore(username, password, uid)
+            # First create a Firebase user to get an auth token
+            auth_result = self._create_firebase_user_with_email(uid, password)
+            if 'error' in auth_result:
+                return auth_result
+            
+            # Store user data in Firestore using the auth token
+            result = self._store_user_in_firestore_authenticated(username, password, uid, auth_result['idToken'])
             
             if 'error' in result:
                 logger.error(f"Failed to store user data: {result}")
@@ -44,6 +51,7 @@ class FirebaseAuth:
                 'success': True,
                 'uid': uid,
                 'username': username,
+                'token': auth_result['idToken'],
                 'message': 'User data stored successfully in Firebase'
             }
             
@@ -54,21 +62,27 @@ class FirebaseAuth:
     def authenticate_user(self, username, password):
         """Authenticate user with stored username and password"""
         try:
-            # Get user data from Firestore by username
-            user_data = self._get_user_by_username(username)
+            # First get the user's email from their username (we'll store email as username@yourapp.com)
+            email = f"{username}@lpoptimizer.com"
             
+            # Authenticate with Firebase Auth
+            auth_result = self._authenticate_firebase_user(email, password)
+            if 'error' in auth_result:
+                return auth_result
+            
+            uid = auth_result['localId']
+            token = auth_result['idToken']
+            
+            # Get additional user data from Firestore
+            user_data = self._get_user_data_authenticated(uid, token)
             if 'error' in user_data:
-                return user_data
-            
-            # Verify password
-            stored_password = user_data.get('password')
-            if stored_password != password:
-                return {'error': 'Invalid username or password'}
+                return {'error': 'User data not found'}
             
             return {
                 'success': True,
-                'uid': user_data['uid'],
-                'username': username,
+                'uid': uid,
+                'username': user_data.get('username', username),
+                'token': token,
                 'message': 'Authentication successful'
             }
             
@@ -76,19 +90,59 @@ class FirebaseAuth:
             logger.error(f"Authentication error: {str(e)}")
             return {'error': 'Authentication failed', 'details': str(e)}
     
-    def _store_user_in_firestore(self, username, password, uid):
-        """Store user data in Firestore using the UID as document ID"""
-        # For Firestore REST API with API key authentication
-        url = f"{self.firestore_url}/users/{uid}?key={self.api_key}"
+    def _create_firebase_user_with_email(self, username, password):
+        """Create Firebase user using username as email"""
+        url = f"{self.auth_url}:signUp?key={self.api_key}"
+        
+        # Use username as email (add domain)
+        email = f"{username}@lpoptimizer.com"
+        
+        payload = {
+            "email": email,
+            "password": password,
+            "returnSecureToken": True
+        }
+        
+        response = requests.post(url, json=payload)
+        data = response.json()
+        
+        if response.status_code != 200:
+            error_message = data.get('error', {}).get('message', 'Unknown error')
+            return {'error': f'Firebase Auth error: {error_message}'}
+        
+        return data
+    
+    def _authenticate_firebase_user(self, email, password):
+        """Authenticate user with Firebase Authentication"""
+        url = f"{self.auth_url}:signInWithPassword?key={self.api_key}"
+        
+        payload = {
+            "email": email,
+            "password": password,
+            "returnSecureToken": True
+        }
+        
+        response = requests.post(url, json=payload)
+        data = response.json()
+        
+        if response.status_code != 200:
+            error_message = data.get('error', {}).get('message', 'Unknown error')
+            return {'error': f'Invalid username or password'}
+        
+        return data
+    
+    def _store_user_in_firestore_authenticated(self, username, password, uid, id_token):
+        """Store user data in Firestore using authenticated token"""
+        url = f"{self.firestore_url}/users/{uid}"
         
         headers = {
+            'Authorization': f'Bearer {id_token}',
             'Content-Type': 'application/json'
         }
         
         payload = {
             "fields": {
                 "username": {"stringValue": username},
-                "password": {"stringValue": password},
                 "uid": {"stringValue": uid},
                 "created_at": {"timestampValue": datetime.utcnow().isoformat() + "Z"},
                 "updated_at": {"timestampValue": datetime.utcnow().isoformat() + "Z"}
@@ -103,33 +157,28 @@ class FirebaseAuth:
         
         return {'success': True}
     
-    def _get_user_by_username(self, username):
-        """Get user data from Firestore by username"""
-        # Use API key for authentication
-        url = f"{self.firestore_url}/users?key={self.api_key}"
+    def _get_user_data_authenticated(self, uid, id_token):
+        """Get user data from Firestore using authenticated token"""
+        url = f"{self.firestore_url}/users/{uid}"
         
-        response = requests.get(url)
+        headers = {
+            'Authorization': f'Bearer {id_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.get(url, headers=headers)
         
         if response.status_code != 200:
             logger.error(f"Firestore query error: Status {response.status_code}, Response: {response.text}")
-            return {'error': f'Failed to query user data from Firestore: {response.text}'}
+            return {'error': f'Failed to get user data from Firestore: {response.text}'}
         
         data = response.json()
-        documents = data.get('documents', [])
+        fields = data.get('fields', {})
         
-        # Search through documents to find matching username
-        for doc in documents:
-            fields = doc.get('fields', {})
-            stored_username = fields.get('username', {}).get('stringValue', '')
-            
-            if stored_username == username:
-                return {
-                    'uid': fields.get('uid', {}).get('stringValue', ''),
-                    'username': stored_username,
-                    'password': fields.get('password', {}).get('stringValue', '')
-                }
-        
-        return {'error': 'User not found'}
+        return {
+            'uid': fields.get('uid', {}).get('stringValue', ''),
+            'username': fields.get('username', {}).get('stringValue', ''),
+        }
 
 class WebScraper:
     def __init__(self):
@@ -346,8 +395,9 @@ def health_check():
 @app.route('/auth/store-user', methods=['POST'])
 def store_user():
     """
-    Store user data in Firebase Firestore
-    Expects JSON: {"username": "john_doe", "password": "password123", "uid": "user123"}
+    Store user data in Firebase Firestore with proper authentication
+    Expects JSON: {"username": "john_doe", "password": "password123"}
+    Note: UID will be auto-generated by Firebase
     """
     try:
         data = request.get_json()
@@ -360,12 +410,11 @@ def store_user():
         
         username = data.get('username')
         password = data.get('password')
-        uid = data.get('uid')
         
-        if not username or not password or not uid:
+        if not username or not password:
             return jsonify({
                 'status': 'error',
-                'message': 'Username, password, and uid are required'
+                'message': 'Username and password are required'
             }), 400
         
         # Validate inputs
@@ -381,14 +430,8 @@ def store_user():
                 'message': 'Password must be at least 6 characters long'
             }), 400
         
-        if len(uid) < 1:
-            return jsonify({
-                'status': 'error',
-                'message': 'UID cannot be empty'
-            }), 400
-        
-        # Store user data in Firebase
-        result = firebase_auth.store_user_data(username, password, uid)
+        # Store user data in Firebase (UID will be auto-generated)
+        result = firebase_auth.store_user_data(username, password, username)
         
         if 'error' in result:
             return jsonify({
@@ -398,10 +441,11 @@ def store_user():
         
         return jsonify({
             'status': 'success',
-            'message': 'User data stored successfully',
+            'message': 'User registered successfully',
             'data': {
                 'uid': result['uid'],
-                'username': result['username']
+                'username': result['username'],
+                'token': result['token']
             }
         }), 201
         
@@ -450,7 +494,8 @@ def login():
             'message': 'Login successful',
             'data': {
                 'uid': result['uid'],
-                'username': result['username']
+                'username': result['username'],
+                'token': result['token']
             }
         }), 200
         

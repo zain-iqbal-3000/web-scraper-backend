@@ -30,11 +30,16 @@ class FirebaseAuth:
     def store_user_data(self, username, password, uid):
         """Store username, password and uid in Firestore"""
         try:
+            # Log the attempt for debugging
+            logger.info(f"Attempting to store user data for UID: {uid}, Username: {username}")
+            
             result = self._store_user_in_firestore(username, password, uid)
             
             if 'error' in result:
+                logger.error(f"Failed to store user data: {result}")
                 return result
             
+            logger.info(f"Successfully stored user data for UID: {uid}")
             return {
                 'success': True,
                 'uid': uid,
@@ -73,7 +78,8 @@ class FirebaseAuth:
     
     def _store_user_in_firestore(self, username, password, uid):
         """Store user data in Firestore using the UID as document ID"""
-        url = f"{self.firestore_url}/users/{uid}"
+        # For Firestore REST API with API key authentication
+        url = f"{self.firestore_url}/users/{uid}?key={self.api_key}"
         
         headers = {
             'Content-Type': 'application/json'
@@ -92,21 +98,21 @@ class FirebaseAuth:
         response = requests.patch(url, json=payload, headers=headers)
         
         if response.status_code not in [200, 201]:
-            logger.error(f"Firestore error: {response.text}")
-            return {'error': 'Failed to store user data in Firestore'}
+            logger.error(f"Firestore error: Status {response.status_code}, Response: {response.text}")
+            return {'error': f'Failed to store user data in Firestore: {response.text}'}
         
         return {'success': True}
     
     def _get_user_by_username(self, username):
         """Get user data from Firestore by username"""
-        # First, we need to get all documents and filter by username
-        # In production, you might want to use Firestore queries for better performance
-        url = f"{self.firestore_url}/users"
+        # Use API key for authentication
+        url = f"{self.firestore_url}/users?key={self.api_key}"
         
         response = requests.get(url)
         
         if response.status_code != 200:
-            return {'error': 'Failed to query user data from Firestore'}
+            logger.error(f"Firestore query error: Status {response.status_code}, Response: {response.text}")
+            return {'error': f'Failed to query user data from Firestore: {response.text}'}
         
         data = response.json()
         documents = data.get('documents', [])

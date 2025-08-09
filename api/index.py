@@ -6,6 +6,8 @@ import re
 from urllib.parse import urljoin, urlparse
 import logging
 import os
+import json
+from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)
@@ -13,6 +15,157 @@ CORS(app)
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Firebase configuration (you'll get these from Firebase console)
+FIREBASE_API_KEY = os.environ.get('FIREBASE_API_KEY', '')
+FIREBASE_PROJECT_ID = os.environ.get('FIREBASE_PROJECT_ID', '')
+FIREBASE_AUTH_DOMAIN = f"{FIREBASE_PROJECT_ID}.firebaseapp.com"
+
+# Firebase Authentication Class
+class FirebaseAuth:
+    def __init__(self):
+        self.api_key = FIREBASE_API_KEY
+        self.auth_url = f"https://identitytoolkit.googleapis.com/v1/accounts"
+        self.firestore_url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents"
+    
+    def register_user(self, email, password, username):
+        """Register a new user with Firebase Auth and store username in Firestore"""
+        try:
+            # Step 1: Create user with Firebase Auth
+            auth_response = self._create_firebase_user(email, password)
+            if 'error' in auth_response:
+                return auth_response
+            
+            user_id = auth_response['localId']
+            id_token = auth_response['idToken']
+            
+            # Step 2: Store username in Firestore
+            firestore_response = self._store_username_in_firestore(user_id, username, id_token)
+            if 'error' in firestore_response:
+                return firestore_response
+            
+            return {
+                'success': True,
+                'user_id': user_id,
+                'username': username,
+                'email': email,
+                'token': id_token
+            }
+            
+        except Exception as e:
+            logger.error(f"Registration error: {str(e)}")
+            return {'error': 'Registration failed', 'details': str(e)}
+    
+    def login_user(self, email, password):
+        """Login user with Firebase Auth and get username from Firestore"""
+        try:
+            # Step 1: Authenticate with Firebase Auth
+            auth_response = self._authenticate_firebase_user(email, password)
+            if 'error' in auth_response:
+                return auth_response
+            
+            user_id = auth_response['localId']
+            id_token = auth_response['idToken']
+            
+            # Step 2: Get username from Firestore
+            username_response = self._get_username_from_firestore(user_id, id_token)
+            if 'error' in username_response:
+                return username_response
+            
+            return {
+                'success': True,
+                'user_id': user_id,
+                'username': username_response['username'],
+                'email': email,
+                'token': id_token
+            }
+            
+        except Exception as e:
+            logger.error(f"Login error: {str(e)}")
+            return {'error': 'Login failed', 'details': str(e)}
+    
+    def _create_firebase_user(self, email, password):
+        """Create user with Firebase Authentication"""
+        url = f"{self.auth_url}:signUp?key={self.api_key}"
+        
+        payload = {
+            "email": email,
+            "password": password,
+            "returnSecureToken": True
+        }
+        
+        response = requests.post(url, json=payload)
+        data = response.json()
+        
+        if response.status_code != 200:
+            error_message = data.get('error', {}).get('message', 'Unknown error')
+            return {'error': f'Firebase Auth error: {error_message}'}
+        
+        return data
+    
+    def _authenticate_firebase_user(self, email, password):
+        """Authenticate user with Firebase Authentication"""
+        url = f"{self.auth_url}:signInWithPassword?key={self.api_key}"
+        
+        payload = {
+            "email": email,
+            "password": password,
+            "returnSecureToken": True
+        }
+        
+        response = requests.post(url, json=payload)
+        data = response.json()
+        
+        if response.status_code != 200:
+            error_message = data.get('error', {}).get('message', 'Unknown error')
+            return {'error': f'Firebase Auth error: {error_message}'}
+        
+        return data
+    
+    def _store_username_in_firestore(self, user_id, username, id_token):
+        """Store username in Firestore"""
+        url = f"{self.firestore_url}/users/{user_id}"
+        
+        headers = {
+            'Authorization': f'Bearer {id_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        payload = {
+            "fields": {
+                "username": {"stringValue": username},
+                "created_at": {"timestampValue": datetime.utcnow().isoformat() + "Z"}
+            }
+        }
+        
+        response = requests.patch(url, json=payload, headers=headers)
+        
+        if response.status_code not in [200, 201]:
+            return {'error': 'Failed to store username in Firestore'}
+        
+        return {'success': True}
+    
+    def _get_username_from_firestore(self, user_id, id_token):
+        """Get username from Firestore"""
+        url = f"{self.firestore_url}/users/{user_id}"
+        
+        headers = {
+            'Authorization': f'Bearer {id_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code != 200:
+            return {'error': 'Failed to get username from Firestore'}
+        
+        data = response.json()
+        username = data.get('fields', {}).get('username', {}).get('stringValue', '')
+        
+        if not username:
+            return {'error': 'Username not found'}
+        
+        return {'username': username}
 
 class WebScraper:
     def __init__(self):
@@ -208,8 +361,9 @@ class WebScraper:
         
         return ctas[:10] if ctas else []
 
-# Initialize scraper
+# Initialize scraper and Firebase auth
 scraper = WebScraper()
+firebase_auth = FirebaseAuth()
 
 @app.route('/', methods=['GET'])
 def health_check():
@@ -220,6 +374,124 @@ def health_check():
         'version': '1.0.0',
         'endpoint': '/scrape-batch'
     })
+
+@app.route('/auth/register', methods=['POST'])
+def register():
+    """
+    Register a new user
+    Expects JSON: {"email": "user@example.com", "password": "password123", "username": "john_doe"}
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Request body is required'
+            }), 400
+        
+        email = data.get('email')
+        password = data.get('password')
+        username = data.get('username')
+        
+        if not email or not password or not username:
+            return jsonify({
+                'status': 'error',
+                'message': 'Email, password, and username are required'
+            }), 400
+        
+        # Validate email format
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_pattern, email):
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid email format'
+            }), 400
+        
+        # Validate password length
+        if len(password) < 6:
+            return jsonify({
+                'status': 'error',
+                'message': 'Password must be at least 6 characters long'
+            }), 400
+        
+        # Register user
+        result = firebase_auth.register_user(email, password, username)
+        
+        if 'error' in result:
+            return jsonify({
+                'status': 'error',
+                'message': result['error']
+            }), 400
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'User registered successfully',
+            'data': {
+                'user_id': result['user_id'],
+                'username': result['username'],
+                'email': result['email'],
+                'token': result['token']
+            }
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"Registration endpoint error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/auth/login', methods=['POST'])
+def login():
+    """
+    Login user
+    Expects JSON: {"email": "user@example.com", "password": "password123"}
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Request body is required'
+            }), 400
+        
+        email = data.get('email')
+        password = data.get('password')
+        
+        if not email or not password:
+            return jsonify({
+                'status': 'error',
+                'message': 'Email and password are required'
+            }), 400
+        
+        # Login user
+        result = firebase_auth.login_user(email, password)
+        
+        if 'error' in result:
+            return jsonify({
+                'status': 'error',
+                'message': result['error']
+            }), 401
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Login successful',
+            'data': {
+                'user_id': result['user_id'],
+                'username': result['username'],
+                'email': result['email'],
+                'token': result['token']
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Login endpoint error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error'
+        }), 500
 
 @app.route('/scrape-batch', methods=['POST'])
 def scrape_batch_endpoint():

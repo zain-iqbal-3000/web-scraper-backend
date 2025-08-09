@@ -82,6 +82,7 @@ class FirebaseAuth:
                 'success': True,
                 'uid': uid,
                 'email': email,
+                'username': user_data.get('username', ''),
                 'token': token,
                 'message': 'Authentication successful'
             }
@@ -175,6 +176,7 @@ class FirebaseAuth:
         return {
             'uid': fields.get('uid', {}).get('stringValue', ''),
             'email': fields.get('email', {}).get('stringValue', ''),
+            'username': fields.get('username', {}).get('stringValue', ''),
         }
 
 class WebScraper:
@@ -492,6 +494,7 @@ def login():
             'data': {
                 'uid': result['uid'],
                 'email': result.get('email', email),
+                'username': result.get('username', ''),
                 'token': result['token']
             }
         }), 200

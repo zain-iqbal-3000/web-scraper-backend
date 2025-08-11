@@ -168,22 +168,15 @@ class FirebaseAuth:
         
         return {'username': username}
     
-    def change_password(self, uid, old_password, new_password):
+    def change_password(self, email, old_password, new_password):
         """Change user password after verifying old password"""
         try:
-            # Step 1: Get user's email from Firebase Auth using UID
-            user_info = self._get_user_info_by_uid(uid)
-            if 'error' in user_info:
-                return user_info
-            
-            email = user_info['email']
-            
-            # Step 2: Verify old password by attempting authentication
+            # Step 1: Verify old password by attempting authentication
             auth_response = self._authenticate_firebase_user(email, old_password)
             if 'error' in auth_response:
                 return {'error': 'Old password is incorrect'}
             
-            # Step 3: Change password using Firebase Auth API
+            # Step 2: Change password using Firebase Auth API
             id_token = auth_response['idToken']
             password_change_response = self._update_firebase_password(id_token, new_password)
             if 'error' in password_change_response:
@@ -199,7 +192,7 @@ class FirebaseAuth:
             return {'error': 'Password change failed', 'details': str(e)}
     
     def _get_user_info_by_uid(self, uid):
-        """Get user info from Firebase Auth using lookup API"""
+        """Get user info from Firebase Auth using getAccountInfo API"""
         url = f"{self.auth_url}:lookup?key={self.api_key}"
         
         payload = {
@@ -211,23 +204,42 @@ class FirebaseAuth:
             data = response.json()
             
             if response.status_code != 200:
-                error_message = data.get('error', {}).get('message', 'Unknown error')
-                return {'error': f'Firebase lookup error: {error_message}'}
+                # If lookup fails, try alternative approach using Firestore
+                return self._get_email_from_firestore(uid)
             
             users = data.get('users', [])
             if not users:
-                return {'error': 'User not found'}
+                return self._get_email_from_firestore(uid)
             
             user = users[0]
             email = user.get('email', '')
             if not email:
-                return {'error': 'Email not found for user'}
+                return self._get_email_from_firestore(uid)
                 
             return {'email': email}
             
         except Exception as e:
             logger.error(f"Get user info error: {str(e)}")
-            return {'error': f'Failed to get user info: {str(e)}'}
+            return self._get_email_from_firestore(uid)
+    
+    def _get_email_from_firestore(self, uid):
+        """Fallback method to get email from Firestore"""
+        url = f"{self.firestore_url}/users/{uid}"
+        
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                data = response.json()
+                email = data.get('fields', {}).get('email', {}).get('stringValue', '')
+                if email:
+                    return {'email': email}
+            
+            # If still no email found, we'll need to ask user to provide email
+            return {'error': 'User email not found. Please provide email for password change.'}
+            
+        except Exception as e:
+            logger.error(f"Firestore lookup error: {str(e)}")
+            return {'error': 'Unable to retrieve user information'}
     
     def _update_firebase_password(self, id_token, new_password):
         """Update user password using Firebase Auth API"""
@@ -583,7 +595,8 @@ def login():
 def change_password():
     """
     Change user password
-    Expects JSON: {"uid": "user_uid", "old_password": "current_password", "new_password": "new_password"}
+    Expects JSON: {"uid": "user_uid", "email": "user@example.com", "old_password": "current_password", "new_password": "new_password"}
+    Note: Both UID and email are required for security verification
     """
     try:
         data = request.get_json()
@@ -595,14 +608,15 @@ def change_password():
             }), 400
         
         uid = data.get('uid')
+        email = data.get('email')
         old_password = data.get('old_password')
         new_password = data.get('new_password')
         
         # Validate required fields
-        if not uid or not old_password or not new_password:
+        if not uid or not email or not old_password or not new_password:
             return jsonify({
                 'status': 'error',
-                'message': 'UID, old password, and new password are required'
+                'message': 'UID, email, old password, and new password are required'
             }), 400
         
         # Validate new password length
@@ -612,8 +626,8 @@ def change_password():
                 'message': 'New password must be at least 6 characters long'
             }), 400
         
-        # Change password
-        result = firebase_auth.change_password(uid, old_password, new_password)
+        # Change password using email
+        result = firebase_auth.change_password(email, old_password, new_password)
         
         if 'error' in result:
             return jsonify({

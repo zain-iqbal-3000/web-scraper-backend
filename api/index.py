@@ -297,57 +297,34 @@ class FirebaseAuth:
             return {'error': 'Failed to send password reset email', 'details': str(e)}
     
     def _check_email_exists_in_database(self, email):
-        """Check if email exists in our Firestore database - strict verification"""
+        """Check if email exists using Firebase Auth lookup API"""
         try:
-            # Get all users from Firestore using REST API
-            url = f"{self.firestore_url}/users"
+            # Use Firebase Auth lookup API to check if email exists
+            url = f"{self.auth_url}:createAuthUri?key={self.api_key}"
             
-            # Try without authentication first (if database rules allow public read)
-            response = requests.get(url)
+            payload = {
+                "identifier": email,
+                "continueUri": "http://localhost"  # Required but not used
+            }
             
-            if response.status_code == 403:
-                # If forbidden, try with a different approach - use Firebase Auth to get a token first
-                logger.info("Firestore requires authentication, trying alternative approach")
-                return self._check_email_with_auth_fallback(email)
-            elif response.status_code != 200:
-                logger.error(f"Firestore access error: {response.status_code} - {response.text}")
-                # For any other error, return email not found to be safe
-                return {'error': 'Email address not found'}
-            
+            response = requests.post(url, json=payload)
             data = response.json()
             
-            # Check if we have documents
-            if 'documents' not in data or not data['documents']:
-                logger.info("No users found in database")
+            if response.status_code == 200:
+                # Check if the email is registered
+                if 'registered' in data and data['registered']:
+                    logger.info(f"Email {email} is registered in Firebase Auth")
+                    return {'success': True}
+                else:
+                    logger.info(f"Email {email} is not registered in Firebase Auth")
+                    return {'error': 'Email address not found'}
+            else:
+                logger.error(f"Firebase Auth lookup error: {response.status_code} - {response.text}")
+                # If we can't verify, assume email doesn't exist for security
                 return {'error': 'Email address not found'}
             
-            # Search through all user documents for matching email
-            for document in data['documents']:
-                if 'fields' in document and 'email' in document['fields']:
-                    stored_email = document['fields']['email'].get('stringValue', '')
-                    if stored_email.lower() == email.lower():  # Case insensitive comparison
-                        logger.info(f"Email {email} found in database")
-                        return {'success': True}
-            
-            # Email not found in any document
-            logger.info(f"Email {email} not found in database")
-            return {'error': 'Email address not found'}
-            
         except Exception as e:
-            logger.error(f"Database email check error: {str(e)}")
-            return {'error': 'Email address not found'}
-    
-    def _check_email_with_auth_fallback(self, email):
-        """Fallback method to check email when Firestore requires authentication"""
-        try:
-            # Try to use Firebase Auth lookup API instead
-            # This is a simpler approach - just return not found for safety
-            # since we can't easily access Firestore without user authentication
-            logger.warning(f"Cannot verify email {email} due to Firestore permissions - assuming not found")
-            return {'error': 'Email address not found'}
-            
-        except Exception as e:
-            logger.error(f"Auth fallback error: {str(e)}")
+            logger.error(f"Email verification error: {str(e)}")
             return {'error': 'Email address not found'}
 
     def _send_password_reset_email(self, email):

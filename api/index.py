@@ -293,25 +293,28 @@ class FirebaseAuth:
             
             if response.status_code != 200:
                 logger.error(f"Firestore query error: {response.status_code} - {response.text}")
-                return {'error': 'Unable to verify email address'}
+                # Return email not found instead of technical error for user
+                return {'error': 'Email address not found'}
             
             data = response.json()
             
             # Check if any documents were returned
             if not data or len(data) == 0:
-                return {'error': 'No account found with this email address'}
+                return {'error': 'Email address not found'}
             
             # Check if the first result has a document (not just metadata)
             first_result = data[0]
             if 'document' not in first_result:
-                return {'error': 'No account found with this email address'}
+                return {'error': 'Email address not found'}
             
             # Email exists in our database
+            logger.info(f"Email {email} found in database")
             return {'success': True}
             
         except Exception as e:
             logger.error(f"Database email check error: {str(e)}")
-            return {'error': 'Unable to verify email address'}
+            # Return user-friendly error instead of technical error
+            return {'error': 'Email address not found'}
 
     def _send_password_reset_email(self, email):
         """Send password reset email using Firebase Auth API (email already verified to exist)"""

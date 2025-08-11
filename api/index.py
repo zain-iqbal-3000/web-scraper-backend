@@ -271,50 +271,44 @@ class FirebaseAuth:
     def _check_email_exists_in_database(self, email):
         """Check if email exists in our Firestore database"""
         try:
-            # Query Firestore to find user with this email
+            # Try a simpler approach - get all users and check emails
+            # This is acceptable for smaller user bases, but should be optimized for scale
             url = f"{self.firestore_url}/users"
             
-            # Use Firestore's structured query to search for email
-            params = {
-                "structuredQuery": {
-                    "where": {
-                        "fieldFilter": {
-                            "field": {"fieldPath": "email"},
-                            "op": "EQUAL",
-                            "value": {"stringValue": email}
-                        }
-                    },
-                    "from": [{"collectionId": "users"}],
-                    "limit": 1
-                }
-            }
-            
-            response = requests.post(f"{url}:runQuery", json=params)
+            response = requests.get(url)
             
             if response.status_code != 200:
-                logger.error(f"Firestore query error: {response.status_code} - {response.text}")
-                # Return email not found instead of technical error for user
-                return {'error': 'Email address not found'}
+                logger.error(f"Firestore access error: {response.status_code} - {response.text}")
+                # If we can't access the database, allow the Firebase Auth to handle it
+                # This maintains functionality even if Firestore is having issues
+                logger.warning("Firestore check failed, proceeding with Firebase Auth check")
+                return {'success': True}  # Allow Firebase Auth to handle the verification
             
             data = response.json()
             
-            # Check if any documents were returned
-            if not data or len(data) == 0:
+            # Check if we have documents
+            if 'documents' not in data:
+                logger.info("No users found in database")
                 return {'error': 'Email address not found'}
             
-            # Check if the first result has a document (not just metadata)
-            first_result = data[0]
-            if 'document' not in first_result:
-                return {'error': 'Email address not found'}
+            # Search through all user documents for matching email
+            for document in data['documents']:
+                if 'fields' in document and 'email' in document['fields']:
+                    stored_email = document['fields']['email'].get('stringValue', '')
+                    if stored_email.lower() == email.lower():  # Case insensitive comparison
+                        logger.info(f"Email {email} found in database")
+                        return {'success': True}
             
-            # Email exists in our database
-            logger.info(f"Email {email} found in database")
-            return {'success': True}
+            # Email not found in any document
+            logger.info(f"Email {email} not found in database")
+            return {'error': 'Email address not found'}
             
         except Exception as e:
             logger.error(f"Database email check error: {str(e)}")
-            # Return user-friendly error instead of technical error
-            return {'error': 'Email address not found'}
+            # If there's an error checking the database, let Firebase Auth handle it
+            # This ensures the system remains functional even with database issues
+            logger.warning("Database check failed due to exception, proceeding with Firebase Auth")
+            return {'success': True}
 
     def _send_password_reset_email(self, email):
         """Send password reset email using Firebase Auth API (email already verified to exist)"""

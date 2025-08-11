@@ -59,13 +59,19 @@ class FirebaseAuth:
     def add_user(self, email, password):
         """Add a new user with only email and password (simplified registration)"""
         try:
-            # Create user with Firebase Auth only
+            # Step 1: Create user with Firebase Auth
             auth_response = self._create_firebase_user(email, password)
             if 'error' in auth_response:
                 return auth_response
             
             user_id = auth_response['localId']
             id_token = auth_response['idToken']
+            
+            # Step 2: Store basic user data in Firestore
+            firestore_response = self._store_basic_user_data_in_firestore(user_id, email, id_token)
+            if 'error' in firestore_response:
+                logger.error(f"Failed to store user data in Firestore: {firestore_response}")
+                # Continue anyway since the user was created in Firebase Auth
             
             return {
                 'success': True,
@@ -190,6 +196,32 @@ class FirebaseAuth:
             return {'error': 'Username not found'}
         
         return {'username': username}
+    
+    def _store_basic_user_data_in_firestore(self, user_id, email, id_token):
+        """Store basic user data (email and uid) in Firestore"""
+        url = f"{self.firestore_url}/users/{user_id}"
+        
+        headers = {
+            'Authorization': f'Bearer {id_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        payload = {
+            "fields": {
+                "email": {"stringValue": email},
+                "uid": {"stringValue": user_id},
+                "created_at": {"timestampValue": datetime.utcnow().isoformat() + "Z"},
+                "updated_at": {"timestampValue": datetime.utcnow().isoformat() + "Z"}
+            }
+        }
+        
+        response = requests.patch(url, json=payload, headers=headers)
+        
+        if response.status_code not in [200, 201]:
+            logger.error(f"Firestore error: Status {response.status_code}, Response: {response.text}")
+            return {'error': f'Failed to store basic user data in Firestore: {response.text}'}
+        
+        return {'success': True}
     
     def change_password(self, email, old_password, new_password):
         """Change user password after verifying old password"""

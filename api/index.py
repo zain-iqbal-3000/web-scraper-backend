@@ -275,10 +275,14 @@ class FirebaseAuth:
             return {'error': 'Password change failed', 'details': str(e)}
     
     def forgot_password(self, email):
-        """Send password reset email and let Firebase Auth handle email validation"""
+        """Send password reset email after verifying email exists using Firebase Auth"""
         try:
-            # Send password reset email directly to Firebase Auth
-            # Firebase will validate if email exists and return appropriate response
+            # Step 1: Check if email is registered using Firebase Auth
+            email_check_response = self._check_if_email_registered(email)
+            if 'error' in email_check_response:
+                return email_check_response
+            
+            # Step 2: If email is registered, send password reset email
             reset_response = self._send_password_reset_email(email)
             if 'error' in reset_response:
                 return reset_response
@@ -291,6 +295,37 @@ class FirebaseAuth:
         except Exception as e:
             logger.error(f"Forgot password error: {str(e)}")
             return {'error': 'Failed to send password reset email', 'details': str(e)}
+    
+    def _check_if_email_registered(self, email):
+        """Check if email is registered using Firebase Auth createAuthUri API"""
+        try:
+            url = f"{self.auth_url}:createAuthUri?key={self.api_key}"
+            
+            payload = {
+                "identifier": email,
+                "continueUri": "http://localhost"
+            }
+            
+            response = requests.post(url, json=payload)
+            data = response.json()
+            
+            logger.info(f"Firebase createAuthUri response for {email}: Status {response.status_code}, Data: {data}")
+            
+            if response.status_code == 200:
+                # Check if the email is registered by looking for 'registered' field
+                if data.get('registered', False):
+                    logger.info(f"Email {email} is registered in Firebase Auth")
+                    return {'success': True}
+                else:
+                    logger.info(f"Email {email} is NOT registered in Firebase Auth")
+                    return {'error': 'Email address not found'}
+            else:
+                logger.error(f"Firebase createAuthUri error for {email}: {response.status_code} - {response.text}")
+                return {'error': 'Email address not found'}
+                
+        except Exception as e:
+            logger.error(f"Email registration check error: {str(e)}")
+            return {'error': 'Email address not found'}
 
     def _send_password_reset_email(self, email):
         """Send password reset email using Firebase Auth and return Firebase's response messages"""
@@ -304,8 +339,12 @@ class FirebaseAuth:
         response = requests.post(url, json=payload)
         data = response.json()
         
+        # Log the full response for debugging
+        logger.info(f"Firebase password reset response for {email}: Status {response.status_code}, Data: {data}")
+        
         if response.status_code != 200:
             error_message = data.get('error', {}).get('message', 'Unknown error')
+            logger.error(f"Firebase Auth error for {email}: {error_message}")
             
             # Return Firebase's exact error messages
             if 'EMAIL_NOT_FOUND' in error_message:
@@ -319,6 +358,9 @@ class FirebaseAuth:
             else:
                 # For any other Firebase error, return the exact message
                 return {'error': f'Firebase Auth error: {error_message}'}
+        else:
+            # Success response - but let's check what Firebase actually returned
+            logger.info(f"Firebase Auth success response for {email}: {data}")
         
         return {'success': True}
     

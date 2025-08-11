@@ -297,30 +297,29 @@ class FirebaseAuth:
             return {'error': 'Failed to send password reset email', 'details': str(e)}
     
     def _check_email_exists_in_database(self, email):
-        """Check if email exists using Firebase Auth lookup API"""
+        """Check if email exists using Firebase Auth getAccountInfo API"""
         try:
-            # Use Firebase Auth lookup API to check if email exists
-            url = f"{self.auth_url}:createAuthUri?key={self.api_key}"
+            # Use Firebase Auth getAccountInfo API to check if email exists
+            url = f"{self.auth_url}:lookup?key={self.api_key}"
             
             payload = {
-                "identifier": email,
-                "continueUri": "http://localhost"  # Required but not used
+                "email": [email]
             }
             
             response = requests.post(url, json=payload)
             data = response.json()
             
             if response.status_code == 200:
-                # Check if the email is registered
-                if 'registered' in data and data['registered']:
-                    logger.info(f"Email {email} is registered in Firebase Auth")
+                # Check if users array exists and has data
+                if 'users' in data and len(data['users']) > 0:
+                    logger.info(f"Email {email} found in Firebase Auth")
                     return {'success': True}
                 else:
-                    logger.info(f"Email {email} is not registered in Firebase Auth")
+                    logger.info(f"Email {email} not found in Firebase Auth")
                     return {'error': 'Email address not found'}
             else:
                 logger.error(f"Firebase Auth lookup error: {response.status_code} - {response.text}")
-                # If we can't verify, assume email doesn't exist for security
+                # If we can't verify due to API error, assume email doesn't exist for security
                 return {'error': 'Email address not found'}
             
         except Exception as e:

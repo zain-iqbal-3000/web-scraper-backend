@@ -275,14 +275,10 @@ class FirebaseAuth:
             return {'error': 'Password change failed', 'details': str(e)}
     
     def forgot_password(self, email):
-        """Send password reset email using Firebase Auth after checking if email exists in database"""
+        """Send password reset email using Firebase Auth - let Firebase handle email validation"""
         try:
-            # Step 1: Check if email exists in our Firestore database first
-            email_check_response = self._check_email_exists_in_database(email)
-            if 'error' in email_check_response:
-                return email_check_response
-            
-            # Step 2: If email exists in database, proceed with Firebase password reset
+            # Send password reset email directly to Firebase Auth
+            # Firebase will handle email validation and return appropriate errors
             reset_response = self._send_password_reset_email(email)
             if 'error' in reset_response:
                 return reset_response
@@ -295,39 +291,9 @@ class FirebaseAuth:
         except Exception as e:
             logger.error(f"Forgot password error: {str(e)}")
             return {'error': 'Failed to send password reset email', 'details': str(e)}
-    
-    def _check_email_exists_in_database(self, email):
-        """Check if email exists using Firebase Auth getAccountInfo API"""
-        try:
-            # Use Firebase Auth getAccountInfo API to check if email exists
-            url = f"{self.auth_url}:lookup?key={self.api_key}"
-            
-            payload = {
-                "email": [email]
-            }
-            
-            response = requests.post(url, json=payload)
-            data = response.json()
-            
-            if response.status_code == 200:
-                # Check if users array exists and has data
-                if 'users' in data and len(data['users']) > 0:
-                    logger.info(f"Email {email} found in Firebase Auth")
-                    return {'success': True}
-                else:
-                    logger.info(f"Email {email} not found in Firebase Auth")
-                    return {'error': 'Email address not found'}
-            else:
-                logger.error(f"Firebase Auth lookup error: {response.status_code} - {response.text}")
-                # If we can't verify due to API error, assume email doesn't exist for security
-                return {'error': 'Email address not found'}
-            
-        except Exception as e:
-            logger.error(f"Email verification error: {str(e)}")
-            return {'error': 'Email address not found'}
 
     def _send_password_reset_email(self, email):
-        """Send password reset email using Firebase Auth API (email already verified to exist)"""
+        """Send password reset email using Firebase Auth API with proper error handling"""
         url = f"{self.auth_url}:sendOobCode?key={self.api_key}"
         
         payload = {
@@ -341,8 +307,10 @@ class FirebaseAuth:
         if response.status_code != 200:
             error_message = data.get('error', {}).get('message', 'Unknown error')
             
-            # Handle specific Firebase error cases (email existence already checked)
-            if 'INVALID_EMAIL' in error_message:
+            # Handle specific Firebase error cases
+            if 'EMAIL_NOT_FOUND' in error_message:
+                return {'error': 'Email address not found'}
+            elif 'INVALID_EMAIL' in error_message:
                 return {'error': 'Invalid email address format'}
             elif 'USER_DISABLED' in error_message:
                 return {'error': 'This account has been disabled'}

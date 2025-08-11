@@ -297,20 +297,16 @@ class FirebaseAuth:
             return {'error': 'Failed to send password reset email', 'details': str(e)}
     
     def _check_email_exists_in_database(self, email):
-        """Check if email exists in our Firestore database"""
+        """Check if email exists in our Firestore database - strict verification"""
         try:
-            # Try a simpler approach - get all users and check emails
-            # This is acceptable for smaller user bases, but should be optimized for scale
+            # Get all users from Firestore
             url = f"{self.firestore_url}/users"
             
             response = requests.get(url)
             
             if response.status_code != 200:
                 logger.error(f"Firestore access error: {response.status_code} - {response.text}")
-                # If we can't access the database, allow the Firebase Auth to handle it
-                # This maintains functionality even if Firestore is having issues
-                logger.warning("Firestore check failed, proceeding with Firebase Auth check")
-                return {'success': True}  # Allow Firebase Auth to handle the verification
+                return {'error': 'Unable to verify email address. Please try again later.'}
             
             data = response.json()
             
@@ -333,10 +329,7 @@ class FirebaseAuth:
             
         except Exception as e:
             logger.error(f"Database email check error: {str(e)}")
-            # If there's an error checking the database, let Firebase Auth handle it
-            # This ensures the system remains functional even with database issues
-            logger.warning("Database check failed due to exception, proceeding with Firebase Auth")
-            return {'success': True}
+            return {'error': 'Unable to verify email address. Please try again later.'}
 
     def _send_password_reset_email(self, email):
         """Send password reset email using Firebase Auth API (email already verified to exist)"""

@@ -191,6 +191,43 @@ class FirebaseAuth:
             logger.error(f"Change password error: {str(e)}")
             return {'error': 'Password change failed', 'details': str(e)}
     
+    def forgot_password(self, email):
+        """Send password reset email using Firebase Auth"""
+        try:
+            # Send password reset email using Firebase Auth API
+            reset_response = self._send_password_reset_email(email)
+            if 'error' in reset_response:
+                return reset_response
+            
+            return {
+                'success': True,
+                'message': 'Password reset email sent successfully'
+            }
+            
+        except Exception as e:
+            logger.error(f"Forgot password error: {str(e)}")
+            return {'error': 'Failed to send password reset email', 'details': str(e)}
+    
+    def _send_password_reset_email(self, email):
+        """Send password reset email using Firebase Auth API"""
+        url = f"{self.auth_url}:sendOobCode?key={self.api_key}"
+        
+        payload = {
+            "requestType": "PASSWORD_RESET",
+            "email": email
+        }
+        
+        response = requests.post(url, json=payload)
+        data = response.json()
+        
+        if response.status_code != 200:
+            error_message = data.get('error', {}).get('message', 'Unknown error')
+            if 'EMAIL_NOT_FOUND' in error_message:
+                return {'error': 'No account found with this email address'}
+            return {'error': f'Firebase password reset error: {error_message}'}
+        
+        return {'success': True}
+    
     def _get_user_info_by_uid(self, uid):
         """Get user info from Firebase Auth using getAccountInfo API"""
         url = f"{self.auth_url}:lookup?key={self.api_key}"
@@ -464,11 +501,12 @@ def health_check():
     return jsonify({
         'status': 'success',
         'message': 'Web Scraper API with Firebase Auth is running',
-        'version': '2.0.0',
+        'version': '2.1.0',
         'endpoints': {
             'register': '/auth/register',
             'login': '/auth/login',
             'change_password': '/auth/change-password',
+            'forgot_password': '/auth/forgot-password',
             'scrape': '/scrape-batch'
         }
     })
@@ -642,6 +680,58 @@ def change_password():
         
     except Exception as e:
         logger.error(f"Change password endpoint error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/auth/forgot-password', methods=['POST'])
+def forgot_password():
+    """
+    Send password reset email
+    Expects JSON: {"email": "user@example.com"}
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Request body is required'
+            }), 400
+        
+        email = data.get('email')
+        
+        # Validate required fields
+        if not email:
+            return jsonify({
+                'status': 'error',
+                'message': 'Email is required'
+            }), 400
+        
+        # Validate email format
+        if '@' not in email or '.' not in email.split('@')[-1]:
+            return jsonify({
+                'status': 'error',
+                'message': 'Please provide a valid email address'
+            }), 400
+        
+        # Send password reset email
+        result = firebase_auth.forgot_password(email)
+        
+        if 'error' in result:
+            return jsonify({
+                'status': 'error',
+                'message': result['error']
+            }), 400
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Password reset email sent successfully. Please check your email.'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Forgot password endpoint error: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': 'Internal server error'

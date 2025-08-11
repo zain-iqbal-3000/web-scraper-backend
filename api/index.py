@@ -171,12 +171,12 @@ class FirebaseAuth:
     def change_password(self, uid, old_password, new_password):
         """Change user password after verifying old password"""
         try:
-            # Step 1: Get user's email from Firestore using UID
-            user_email = self._get_user_email_from_firestore(uid)
-            if 'error' in user_email:
-                return user_email
+            # Step 1: Get user's email from Firebase Auth using UID
+            user_info = self._get_user_info_by_uid(uid)
+            if 'error' in user_info:
+                return user_info
             
-            email = user_email['email']
+            email = user_info['email']
             
             # Step 2: Verify old password by attempting authentication
             auth_response = self._authenticate_firebase_user(email, old_password)
@@ -198,35 +198,35 @@ class FirebaseAuth:
             logger.error(f"Change password error: {str(e)}")
             return {'error': 'Password change failed', 'details': str(e)}
     
-    def _get_user_email_from_firestore(self, uid):
-        """Get user's email from Firestore using UID"""
-        url = f"{self.firestore_url}/users/{uid}"
-        
-        # We need to use Firebase Admin SDK or get a token first
-        # For now, let's try to get user info using Firebase Auth API
-        user_info_response = self._get_user_info_by_uid(uid)
-        if 'error' in user_info_response:
-            return user_info_response
-        
-        return {'email': user_info_response['email']}
-    
     def _get_user_info_by_uid(self, uid):
-        """Get user info from Firebase Auth using UID (requires admin privileges)"""
-        # Note: This requires Firebase Admin SDK or special privileges
-        # For now, we'll implement a workaround by storing email in Firestore during registration
-        url = f"{self.firestore_url}/users/{uid}"
+        """Get user info from Firebase Auth using lookup API"""
+        url = f"{self.auth_url}:lookup?key={self.api_key}"
         
-        # Try to get user data from Firestore (assuming email is stored there)
+        payload = {
+            "localId": [uid]
+        }
+        
         try:
-            response = requests.get(url)
-            if response.status_code == 200:
-                data = response.json()
-                email = data.get('fields', {}).get('email', {}).get('stringValue', '')
-                if email:
-                    return {'email': email}
+            response = requests.post(url, json=payload)
+            data = response.json()
             
-            return {'error': 'User not found or email not available'}
+            if response.status_code != 200:
+                error_message = data.get('error', {}).get('message', 'Unknown error')
+                return {'error': f'Firebase lookup error: {error_message}'}
+            
+            users = data.get('users', [])
+            if not users:
+                return {'error': 'User not found'}
+            
+            user = users[0]
+            email = user.get('email', '')
+            if not email:
+                return {'error': 'Email not found for user'}
+                
+            return {'email': email}
+            
         except Exception as e:
+            logger.error(f"Get user info error: {str(e)}")
             return {'error': f'Failed to get user info: {str(e)}'}
     
     def _update_firebase_password(self, id_token, new_password):

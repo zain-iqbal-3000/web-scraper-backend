@@ -56,36 +56,6 @@ class FirebaseAuth:
             logger.error(f"Registration error: {str(e)}")
             return {'error': 'Registration failed', 'details': str(e)}
     
-    def add_user(self, email, password, username):
-        """Add a new user with email, password, and username"""
-        try:
-            # Step 1: Create user with Firebase Auth
-            auth_response = self._create_firebase_user(email, password)
-            if 'error' in auth_response:
-                return auth_response
-            
-            user_id = auth_response['localId']
-            id_token = auth_response['idToken']
-            
-            # Step 2: Store user data including username in Firestore
-            firestore_response = self._store_user_data_with_username_in_firestore(user_id, email, username, id_token)
-            if 'error' in firestore_response:
-                logger.error(f"Failed to store user data in Firestore: {firestore_response}")
-                # Continue anyway since the user was created in Firebase Auth
-            
-            return {
-                'success': True,
-                'uid': user_id,
-                'email': email,
-                'username': username,
-                'token': id_token,
-                'message': 'User added successfully'
-            }
-            
-        except Exception as e:
-            logger.error(f"Add user error: {str(e)}")
-            return {'error': 'Failed to add user', 'details': str(e)}
-    
     def login_user(self, email, password):
         """Login user with Firebase Auth and get username from Firestore"""
         try:
@@ -198,59 +168,6 @@ class FirebaseAuth:
         
         return {'username': username}
     
-    def _store_basic_user_data_in_firestore(self, user_id, email, id_token):
-        """Store basic user data (email and uid) in Firestore"""
-        url = f"{self.firestore_url}/users/{user_id}"
-        
-        headers = {
-            'Authorization': f'Bearer {id_token}',
-            'Content-Type': 'application/json'
-        }
-        
-        payload = {
-            "fields": {
-                "email": {"stringValue": email},
-                "uid": {"stringValue": user_id},
-                "created_at": {"timestampValue": datetime.utcnow().isoformat() + "Z"},
-                "updated_at": {"timestampValue": datetime.utcnow().isoformat() + "Z"}
-            }
-        }
-        
-        response = requests.patch(url, json=payload, headers=headers)
-        
-        if response.status_code not in [200, 201]:
-            logger.error(f"Firestore error: Status {response.status_code}, Response: {response.text}")
-            return {'error': f'Failed to store basic user data in Firestore: {response.text}'}
-        
-        return {'success': True}
-    
-    def _store_user_data_with_username_in_firestore(self, user_id, email, username, id_token):
-        """Store user data including username in Firestore"""
-        url = f"{self.firestore_url}/users/{user_id}"
-        
-        headers = {
-            'Authorization': f'Bearer {id_token}',
-            'Content-Type': 'application/json'
-        }
-        
-        payload = {
-            "fields": {
-                "email": {"stringValue": email},
-                "username": {"stringValue": username},
-                "uid": {"stringValue": user_id},
-                "created_at": {"timestampValue": datetime.utcnow().isoformat() + "Z"},
-                "updated_at": {"timestampValue": datetime.utcnow().isoformat() + "Z"}
-            }
-        }
-        
-        response = requests.patch(url, json=payload, headers=headers)
-        
-        if response.status_code not in [200, 201]:
-            logger.error(f"Firestore error: Status {response.status_code}, Response: {response.text}")
-            return {'error': f'Failed to store user data with username in Firestore: {response.text}'}
-        
-        return {'success': True}
-    
     def change_password(self, email, old_password, new_password):
         """Change user password after verifying old password"""
         try:
@@ -275,14 +192,9 @@ class FirebaseAuth:
             return {'error': 'Password change failed', 'details': str(e)}
     
     def forgot_password(self, email):
-        """Send password reset email after verifying email exists using Firebase Auth"""
+        """Send password reset email using Firebase Auth"""
         try:
-            # Step 1: Check if email is registered using Firebase Auth
-            email_check_response = self._check_if_email_registered(email)
-            if 'error' in email_check_response:
-                return email_check_response
-            
-            # Step 2: If email is registered, send password reset email
+            # Send password reset email using Firebase Auth API
             reset_response = self._send_password_reset_email(email)
             if 'error' in reset_response:
                 return reset_response
@@ -296,39 +208,8 @@ class FirebaseAuth:
             logger.error(f"Forgot password error: {str(e)}")
             return {'error': 'Failed to send password reset email', 'details': str(e)}
     
-    def _check_if_email_registered(self, email):
-        """Check if email is registered using Firebase Auth createAuthUri API"""
-        try:
-            url = f"{self.auth_url}:createAuthUri?key={self.api_key}"
-            
-            payload = {
-                "identifier": email,
-                "continueUri": "http://localhost"
-            }
-            
-            response = requests.post(url, json=payload)
-            data = response.json()
-            
-            logger.info(f"Firebase createAuthUri response for {email}: Status {response.status_code}, Data: {data}")
-            
-            if response.status_code == 200:
-                # Check if the email is registered by looking for 'registered' field
-                if data.get('registered', False):
-                    logger.info(f"Email {email} is registered in Firebase Auth")
-                    return {'success': True}
-                else:
-                    logger.info(f"Email {email} is NOT registered in Firebase Auth")
-                    return {'error': 'Email address not found'}
-            else:
-                logger.error(f"Firebase createAuthUri error for {email}: {response.status_code} - {response.text}")
-                return {'error': 'Email address not found'}
-                
-        except Exception as e:
-            logger.error(f"Email registration check error: {str(e)}")
-            return {'error': 'Email address not found'}
-
     def _send_password_reset_email(self, email):
-        """Send password reset email using Firebase Auth and return Firebase's response messages"""
+        """Send password reset email using Firebase Auth API"""
         url = f"{self.auth_url}:sendOobCode?key={self.api_key}"
         
         payload = {
@@ -339,28 +220,11 @@ class FirebaseAuth:
         response = requests.post(url, json=payload)
         data = response.json()
         
-        # Log the full response for debugging
-        logger.info(f"Firebase password reset response for {email}: Status {response.status_code}, Data: {data}")
-        
         if response.status_code != 200:
             error_message = data.get('error', {}).get('message', 'Unknown error')
-            logger.error(f"Firebase Auth error for {email}: {error_message}")
-            
-            # Return Firebase's exact error messages
             if 'EMAIL_NOT_FOUND' in error_message:
-                return {'error': 'Email address not found'}
-            elif 'INVALID_EMAIL' in error_message:
-                return {'error': 'Invalid email address format'}
-            elif 'USER_DISABLED' in error_message:
-                return {'error': 'This account has been disabled'}
-            elif 'TOO_MANY_ATTEMPTS_TRY_LATER' in error_message:
-                return {'error': 'Too many requests. Please try again later'}
-            else:
-                # For any other Firebase error, return the exact message
-                return {'error': f'Firebase Auth error: {error_message}'}
-        else:
-            # Success response - but let's check what Firebase actually returned
-            logger.info(f"Firebase Auth success response for {email}: {data}")
+                return {'error': 'No account found with this email address'}
+            return {'error': f'Firebase password reset error: {error_message}'}
         
         return {'success': True}
     
@@ -637,10 +501,9 @@ def health_check():
     return jsonify({
         'status': 'success',
         'message': 'Web Scraper API with Firebase Auth is running',
-        'version': '2.2.0',
+        'version': '2.1.0',
         'endpoints': {
             'register': '/auth/register',
-            'add_user': '/auth/add-user',
             'login': '/auth/login',
             'change_password': '/auth/change-password',
             'forgot_password': '/auth/forgot-password',
@@ -710,81 +573,6 @@ def register():
         
     except Exception as e:
         logger.error(f"Registration endpoint error: {str(e)}")
-        return jsonify({
-            'status': 'error',
-            'message': 'Internal server error'
-        }), 500
-
-@app.route('/auth/add-user', methods=['POST'])
-def add_user():
-    """
-    Add a new user with email, password, and username
-    Expects JSON: {"email": "user@example.com", "password": "password123", "username": "john_doe"}
-    UID will be auto-generated by Firebase
-    """
-    try:
-        data = request.get_json()
-        
-        if not data:
-            return jsonify({
-                'status': 'error',
-                'message': 'Request body is required'
-            }), 400
-        
-        email = data.get('email')
-        password = data.get('password')
-        username = data.get('username')
-        
-        # Validate required fields
-        if not email or not password or not username:
-            return jsonify({
-                'status': 'error',
-                'message': 'Email, password, and username are required'
-            }), 400
-        
-        # Validate email format
-        if '@' not in email or '.' not in email.split('@')[-1]:
-            return jsonify({
-                'status': 'error',
-                'message': 'Please provide a valid email address'
-            }), 400
-        
-        # Validate password length
-        if len(password) < 6:
-            return jsonify({
-                'status': 'error',
-                'message': 'Password must be at least 6 characters long'
-            }), 400
-        
-        # Validate username length and format
-        if len(username.strip()) < 2:
-            return jsonify({
-                'status': 'error',
-                'message': 'Username must be at least 2 characters long'
-            }), 400
-        
-        # Add user with username
-        result = firebase_auth.add_user(email, password, username.strip())
-        
-        if 'error' in result:
-            return jsonify({
-                'status': 'error',
-                'message': result['error']
-            }), 400
-        
-        return jsonify({
-            'status': 'success',
-            'message': 'User added successfully',
-            'data': {
-                'uid': result['uid'],
-                'email': result['email'],
-                'username': result['username'],
-                'token': result['token']
-            }
-        }), 201
-        
-    except Exception as e:
-        logger.error(f"Add user endpoint error: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': 'Internal server error'

@@ -821,8 +821,7 @@ def health_check():
             'login': '/auth/login',
             'change_password': '/auth/change-password',
             'forgot_password': '/auth/forgot-password',
-            'scrape': '/scrape-batch',
-            'scrape_ai': '/scrape-batch-ai'
+            'scrape': '/scrape'
         },
         'ai_features': {
             'headline_optimization': True,
@@ -1061,58 +1060,12 @@ def forgot_password():
             'message': 'Internal server error'
         }), 500
 
-@app.route('/scrape-batch', methods=['POST'])
-def scrape_batch_endpoint():
+@app.route('/scrape', methods=['POST'])
+def scrape_endpoint():
     """
-    Batch scraping endpoint
+    AI-enhanced scraping endpoint with content optimization
     Expects JSON: {"urls": ["https://example1.com", "https://example2.com"]}
-    """
-    try:
-        data = request.get_json()
-        
-        if not data or 'urls' not in data:
-            return jsonify({
-                'status': 'error',
-                'message': 'URLs array is required in request body'
-            }), 400
-        
-        urls = data['urls']
-        
-        if not isinstance(urls, list) or len(urls) == 0:
-            return jsonify({
-                'status': 'error',
-                'message': 'URLs must be a non-empty array'
-            }), 400
-        
-        if len(urls) > 10:  # Limit batch size
-            return jsonify({
-                'status': 'error',
-                'message': 'Maximum 10 URLs allowed per batch'
-            }), 400
-        
-        results = []
-        for url in urls:
-            result = scraper.scrape_website(url)
-            results.append(result)
-        
-        return jsonify({
-            'status': 'success',
-            'data': results
-        })
-    
-    except Exception as e:
-        logger.error(f"Batch API error: {str(e)}")
-        return jsonify({
-            'status': 'error',
-            'message': 'Internal server error'
-        }), 500
-
-@app.route('/scrape-batch-ai', methods=['POST'])
-def scrape_batch_ai_endpoint():
-    """
-    AI-enhanced batch scraping endpoint with headline optimization
-    Expects JSON: {"urls": ["https://example1.com", "https://example2.com"]}
-    Returns scraped data with AI-generated headline suggestions
+    Returns scraped data with AI-generated suggestions for all content types
     """
     try:
         data = request.get_json()
@@ -1156,7 +1109,7 @@ def scrape_batch_ai_endpoint():
         })
     
     except Exception as e:
-        logger.error(f"AI-enhanced batch API error: {str(e)}")
+        logger.error(f"AI-enhanced scraping API error: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': 'Internal server error'

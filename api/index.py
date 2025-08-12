@@ -316,10 +316,10 @@ class CerebrasAI:
         self.api_key = CEREBRAS_API_KEY
         self.api_url = CEREBRAS_API_URL
     
-    def generate_headline_suggestions(self, original_headline, context=""):
-        """Generate 10 SEO-optimized headline suggestions using Cerebras AI"""
+    def generate_content_suggestions(self, original_content, content_type, context=""):
+        """Generate 10 optimized suggestions for any content type using Cerebras AI"""
         try:
-            prompt = self._create_headline_optimization_prompt(original_headline, context)
+            prompt = self._create_content_optimization_prompt(original_content, content_type, context)
             
             headers = {
                 'Authorization': f'Bearer {self.api_key}',
@@ -331,7 +331,7 @@ class CerebrasAI:
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You are an expert SEO copywriter and digital marketing specialist. Your job is to create compelling, SEO-optimized headlines that increase click-through rates and conversions."
+                        "content": "You are an expert SEO copywriter and digital marketing specialist. Your job is to create compelling, SEO-optimized content that increases click-through rates and conversions."
                     },
                     {
                         "role": "user", 
@@ -357,14 +357,21 @@ class CerebrasAI:
         except Exception as e:
             logger.error(f"Cerebras AI integration error: {str(e)}")
             return {'error': 'Failed to generate AI suggestions'}
+
+    def generate_headline_suggestions(self, original_headline, context=""):
+        """Generate 10 SEO-optimized headline suggestions using Cerebras AI (backward compatibility)"""
+        return self.generate_content_suggestions(original_headline, "headline", context)
     
-    def _create_headline_optimization_prompt(self, headline, context):
-        """Create an optimized prompt for headline suggestions"""
-        return f"""
+    def _create_content_optimization_prompt(self, content, content_type, context):
+        """Create an optimized prompt based on content type"""
+        base_context = f"Website Context: {context if context else 'General website'}"
+        
+        if content_type == "headline":
+            return f"""
 Analyze this website headline and provide 10 improved, SEO-optimized alternatives:
 
-Original Headline: "{headline}"
-Website Context: {context if context else "General website"}
+Original Headline: "{content}"
+{base_context}
 
 Requirements for suggestions:
 1. More engaging and click-worthy
@@ -379,13 +386,101 @@ Requirements for suggestions:
 10. Each suggestion should be unique and distinct
 
 Format your response as a numbered list (1-10) with just the headline suggestions, no additional explanation.
-
-Example format:
-1. [First suggestion]
-2. [Second suggestion]
-...
-10. [Tenth suggestion]
 """
+        
+        elif content_type == "subheadline":
+            return f"""
+Analyze this website subheadline and provide 10 improved, conversion-optimized alternatives:
+
+Original Subheadline: "{content}"
+{base_context}
+
+Requirements for suggestions:
+1. Support and expand on the main headline
+2. Provide additional value proposition details
+3. Create curiosity and encourage further reading
+4. Include social proof or credibility elements
+5. Address potential objections or concerns
+6. Use benefit-focused language
+7. Keep concise but informative
+8. Appeal to emotions and logic
+9. Create sense of urgency or scarcity
+10. Each suggestion should be unique and compelling
+
+Format your response as a numbered list (1-10) with just the subheadline suggestions, no additional explanation.
+"""
+        
+        elif content_type == "description":
+            return f"""
+Analyze this website description/credibility content and provide 10 improved, conversion-optimized alternatives:
+
+Original Description: "{content}"
+{base_context}
+
+Requirements for suggestions:
+1. Build trust and credibility
+2. Highlight unique value propositions
+3. Include social proof elements
+4. Address customer pain points
+5. Use persuasive but authentic language
+6. Include specific benefits and outcomes
+7. Create emotional connection
+8. Use power words and action-oriented language
+9. Keep professional yet engaging tone
+10. Each suggestion should be unique and compelling
+
+Format your response as a numbered list (1-10) with just the description suggestions, no additional explanation.
+"""
+        
+        elif content_type == "cta":
+            return f"""
+Analyze this call-to-action button/link text and provide 10 improved, conversion-optimized alternatives:
+
+Original CTA: "{content}"
+{base_context}
+
+Requirements for suggestions:
+1. Action-oriented and compelling
+2. Create sense of urgency
+3. Clearly communicate the benefit
+4. Use power words that drive clicks
+5. Keep concise (2-5 words ideally)
+6. Remove friction and objections
+7. Create FOMO (fear of missing out)
+8. Use first-person perspective when appropriate
+9. Test different emotional triggers
+10. Each suggestion should be unique and click-worthy
+
+Format your response as a numbered list (1-10) with just the CTA suggestions, no additional explanation.
+"""
+        
+        else:
+            # Default prompt for any other content type
+            return f"""
+Analyze this website content and provide 10 improved, SEO and conversion-optimized alternatives:
+
+Original Content: "{content}"
+Content Type: {content_type}
+{base_context}
+
+Requirements for suggestions:
+1. More engaging and compelling
+2. SEO-optimized when applicable
+3. Clear value proposition
+4. Emotional appeal
+5. Action-oriented language
+6. Address target audience needs
+7. Professional yet accessible tone
+8. Include relevant keywords naturally
+9. Create interest and engagement
+10. Each suggestion should be unique
+
+Format your response as a numbered list (1-10) with just the content suggestions, no additional explanation.
+"""
+
+    def _create_headline_optimization_prompt(self, headline, context):
+        """Create an optimized prompt for headline suggestions (backward compatibility)"""
+        return self._create_content_optimization_prompt(headline, "headline", context)
     
     def _parse_suggestions(self, ai_response):
         """Parse AI response to extract clean suggestions list"""
@@ -459,7 +554,7 @@ class WebScraper:
     
     def scrape_website_with_ai(self, url, cerebras_ai):
         """
-        Scrape a website and enhance headlines with AI suggestions
+        Scrape a website and enhance all content with AI suggestions
         """
         try:
             # First, do the regular scraping
@@ -467,15 +562,16 @@ class WebScraper:
             if 'error' in scraped_data:
                 return scraped_data
             
-            # Enhance headlines with AI suggestions
+            # Enhance all content with AI suggestions
             enhanced_data = scraped_data.copy()
             
             # Process headlines
             if scraped_data.get('headline'):
                 enhanced_headlines = []
                 for headline in scraped_data['headline']:
-                    ai_result = cerebras_ai.generate_headline_suggestions(
+                    ai_result = cerebras_ai.generate_content_suggestions(
                         headline, 
+                        "headline",
                         context=f"Website: {url}"
                     )
                     
@@ -492,9 +588,10 @@ class WebScraper:
             if scraped_data.get('subheadline'):
                 enhanced_subheadlines = []
                 for subheadline in scraped_data['subheadline']:
-                    ai_result = cerebras_ai.generate_headline_suggestions(
+                    ai_result = cerebras_ai.generate_content_suggestions(
                         subheadline,
-                        context=f"Subheadline from: {url}"
+                        "subheadline",
+                        context=f"Website: {url}"
                     )
                     
                     subheadline_data = {
@@ -505,6 +602,44 @@ class WebScraper:
                     enhanced_subheadlines.append(subheadline_data)
                 
                 enhanced_data['subheadline'] = enhanced_subheadlines
+            
+            # Process descriptions/credibility content
+            if scraped_data.get('description_credibility'):
+                enhanced_descriptions = []
+                for description in scraped_data['description_credibility']:
+                    ai_result = cerebras_ai.generate_content_suggestions(
+                        description,
+                        "description",
+                        context=f"Website: {url}"
+                    )
+                    
+                    description_data = {
+                        'original': description,
+                        'ai_suggestions': ai_result.get('suggestions', []) if 'success' in ai_result else [],
+                        'ai_error': ai_result.get('error') if 'error' in ai_result else None
+                    }
+                    enhanced_descriptions.append(description_data)
+                
+                enhanced_data['description_credibility'] = enhanced_descriptions
+            
+            # Process call-to-action content
+            if scraped_data.get('call_to_action'):
+                enhanced_ctas = []
+                for cta in scraped_data['call_to_action']:
+                    ai_result = cerebras_ai.generate_content_suggestions(
+                        cta,
+                        "cta",
+                        context=f"Website: {url}"
+                    )
+                    
+                    cta_data = {
+                        'original': cta,
+                        'ai_suggestions': ai_result.get('suggestions', []) if 'success' in ai_result else [],
+                        'ai_error': ai_result.get('error') if 'error' in ai_result else None
+                    }
+                    enhanced_ctas.append(cta_data)
+                
+                enhanced_data['call_to_action'] = enhanced_ctas
             
             # Add metadata
             enhanced_data['ai_enhanced'] = True
@@ -691,8 +826,12 @@ def health_check():
         },
         'ai_features': {
             'headline_optimization': True,
+            'subheadline_optimization': True,
+            'description_optimization': True,
+            'cta_optimization': True,
             'model': 'cerebras-llama3.1-8b',
-            'suggestions_per_headline': 10
+            'suggestions_per_item': 10,
+            'content_types_supported': ['headline', 'subheadline', 'description', 'cta']
         }
     })
 
@@ -1011,7 +1150,8 @@ def scrape_batch_ai_endpoint():
             'processing_info': {
                 'total_urls': len(urls),
                 'ai_model': 'cerebras-llama3.1-8b',
-                'suggestions_per_headline': 10
+                'suggestions_per_item': 10,
+                'content_types_enhanced': ['headline', 'subheadline', 'description', 'cta']
             }
         })
     

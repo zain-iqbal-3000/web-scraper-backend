@@ -222,9 +222,18 @@ class FirebaseAuth:
         
         if response.status_code != 200:
             error_message = data.get('error', {}).get('message', 'Unknown error')
+            
+            # Handle specific Firebase error cases
             if 'EMAIL_NOT_FOUND' in error_message:
-                return {'error': 'No account found with this email address'}
-            return {'error': f'Firebase password reset error: {error_message}'}
+                return {'error': 'Email address not found'}
+            elif 'INVALID_EMAIL' in error_message:
+                return {'error': 'Invalid email address format'}
+            elif 'USER_DISABLED' in error_message:
+                return {'error': 'This account has been disabled'}
+            elif 'TOO_MANY_ATTEMPTS_TRY_LATER' in error_message:
+                return {'error': 'Too many requests. Please try again later'}
+            else:
+                return {'error': f'Unable to send password reset email: {error_message}'}
         
         return {'success': True}
     

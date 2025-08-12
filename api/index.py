@@ -21,6 +21,10 @@ FIREBASE_API_KEY = os.environ.get('FIREBASE_API_KEY', 'AIzaSyC7-xHHI-ip1uThgqc67
 FIREBASE_PROJECT_ID = os.environ.get('FIREBASE_PROJECT_ID', 'lp-optimization-97f9f')
 FIREBASE_AUTH_DOMAIN = f"{FIREBASE_PROJECT_ID}.firebaseapp.com"
 
+# Cerebras AI configuration
+CEREBRAS_API_KEY = os.environ.get('CEREBRAS_API_KEY', 'csk-t5dtmc52cd435fke365yh26np2fmryhwxwdfkc9mjn236vvp')
+CEREBRAS_API_URL = 'https://api.cerebras.ai/v1/chat/completions'
+
 # Firebase Authentication Class
 class FirebaseAuth:
     def __init__(self):
@@ -306,6 +310,111 @@ class FirebaseAuth:
         
         return {'success': True}
 
+# Cerebras AI Integration Class
+class CerebrasAI:
+    def __init__(self):
+        self.api_key = CEREBRAS_API_KEY
+        self.api_url = CEREBRAS_API_URL
+    
+    def generate_headline_suggestions(self, original_headline, context=""):
+        """Generate 10 SEO-optimized headline suggestions using Cerebras AI"""
+        try:
+            prompt = self._create_headline_optimization_prompt(original_headline, context)
+            
+            headers = {
+                'Authorization': f'Bearer {self.api_key}',
+                'Content-Type': 'application/json'
+            }
+            
+            payload = {
+                "model": "llama3.1-8b",  # Cerebras model
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are an expert SEO copywriter and digital marketing specialist. Your job is to create compelling, SEO-optimized headlines that increase click-through rates and conversions."
+                    },
+                    {
+                        "role": "user", 
+                        "content": prompt
+                    }
+                ],
+                "max_tokens": 1000,
+                "temperature": 0.8,
+                "stream": False
+            }
+            
+            response = requests.post(self.api_url, json=payload, headers=headers)
+            data = response.json()
+            
+            if response.status_code == 200:
+                ai_response = data['choices'][0]['message']['content']
+                suggestions = self._parse_suggestions(ai_response)
+                return {'success': True, 'suggestions': suggestions}
+            else:
+                logger.error(f"Cerebras AI error: {response.status_code} - {response.text}")
+                return {'error': f'AI service error: {response.status_code}'}
+                
+        except Exception as e:
+            logger.error(f"Cerebras AI integration error: {str(e)}")
+            return {'error': 'Failed to generate AI suggestions'}
+    
+    def _create_headline_optimization_prompt(self, headline, context):
+        """Create an optimized prompt for headline suggestions"""
+        return f"""
+Analyze this website headline and provide 10 improved, SEO-optimized alternatives:
+
+Original Headline: "{headline}"
+Website Context: {context if context else "General website"}
+
+Requirements for suggestions:
+1. More engaging and click-worthy
+2. SEO-optimized with relevant keywords
+3. Clear value proposition
+4. Emotional appeal or urgency
+5. Different styles (question-based, benefit-focused, curiosity-driven, etc.)
+6. Maintain the core message but improve conversion potential
+7. Suitable for different audiences (B2B, B2C, professional, casual)
+8. Include power words that drive action
+9. Consider current digital marketing trends
+10. Each suggestion should be unique and distinct
+
+Format your response as a numbered list (1-10) with just the headline suggestions, no additional explanation.
+
+Example format:
+1. [First suggestion]
+2. [Second suggestion]
+...
+10. [Tenth suggestion]
+"""
+    
+    def _parse_suggestions(self, ai_response):
+        """Parse AI response to extract clean suggestions list"""
+        try:
+            lines = ai_response.strip().split('\n')
+            suggestions = []
+            
+            for line in lines:
+                line = line.strip()
+                # Look for numbered lines (1., 2., etc.)
+                if re.match(r'^\d+\.', line):
+                    # Remove the number and clean the suggestion
+                    suggestion = re.sub(r'^\d+\.\s*', '', line).strip()
+                    if suggestion:
+                        suggestions.append(suggestion)
+            
+            # If we don't have exactly 10, try a different parsing approach
+            if len(suggestions) != 10:
+                # Try to extract any text that looks like headlines
+                all_text = ai_response.replace('\n', ' ')
+                # This is a fallback - in practice, the AI should follow the format
+                suggestions = [s.strip() for s in suggestions if s.strip()][:10]
+            
+            return suggestions[:10]  # Ensure we return max 10 suggestions
+            
+        except Exception as e:
+            logger.error(f"Error parsing AI suggestions: {str(e)}")
+            return []
+
 class WebScraper:
     def __init__(self):
         self.session = requests.Session()
@@ -347,6 +456,65 @@ class WebScraper:
         except Exception as e:
             logger.error(f"Scraping error for {url}: {str(e)}")
             return {'error': f'Failed to scrape website: {str(e)}'}
+    
+    def scrape_website_with_ai(self, url, cerebras_ai):
+        """
+        Scrape a website and enhance headlines with AI suggestions
+        """
+        try:
+            # First, do the regular scraping
+            scraped_data = self.scrape_website(url)
+            if 'error' in scraped_data:
+                return scraped_data
+            
+            # Enhance headlines with AI suggestions
+            enhanced_data = scraped_data.copy()
+            
+            # Process headlines
+            if scraped_data.get('headline'):
+                enhanced_headlines = []
+                for headline in scraped_data['headline']:
+                    ai_result = cerebras_ai.generate_headline_suggestions(
+                        headline, 
+                        context=f"Website: {url}"
+                    )
+                    
+                    headline_data = {
+                        'original': headline,
+                        'ai_suggestions': ai_result.get('suggestions', []) if 'success' in ai_result else [],
+                        'ai_error': ai_result.get('error') if 'error' in ai_result else None
+                    }
+                    enhanced_headlines.append(headline_data)
+                
+                enhanced_data['headline'] = enhanced_headlines
+            
+            # Process subheadlines
+            if scraped_data.get('subheadline'):
+                enhanced_subheadlines = []
+                for subheadline in scraped_data['subheadline']:
+                    ai_result = cerebras_ai.generate_headline_suggestions(
+                        subheadline,
+                        context=f"Subheadline from: {url}"
+                    )
+                    
+                    subheadline_data = {
+                        'original': subheadline,
+                        'ai_suggestions': ai_result.get('suggestions', []) if 'success' in ai_result else [],
+                        'ai_error': ai_result.get('error') if 'error' in ai_result else None
+                    }
+                    enhanced_subheadlines.append(subheadline_data)
+                
+                enhanced_data['subheadline'] = enhanced_subheadlines
+            
+            # Add metadata
+            enhanced_data['ai_enhanced'] = True
+            enhanced_data['processing_timestamp'] = datetime.utcnow().isoformat() + "Z"
+            
+            return enhanced_data
+            
+        except Exception as e:
+            logger.error(f"AI-enhanced scraping error for {url}: {str(e)}")
+            return {'error': f'Failed to scrape website with AI enhancement: {str(e)}'}
     
     def _extract_headline(self, soup):
         """Extract main headline from the page"""
@@ -500,23 +668,31 @@ class WebScraper:
         
         return ctas[:10] if ctas else []
 
-# Initialize scraper and Firebase auth
+# Initialize scraper, Firebase auth, and AI
 scraper = WebScraper()
 firebase_auth = FirebaseAuth()
+cerebras_ai = CerebrasAI()
 
 @app.route('/', methods=['GET'])
 def health_check():
     """Health check endpoint"""
     return jsonify({
         'status': 'success',
-        'message': 'Web Scraper API with Firebase Auth is running',
-        'version': '2.1.0',
+        'message': 'Web Scraper API with Firebase Auth and AI Enhancement is running',
+        'version': '3.0.0',
         'endpoints': {
             'register': '/auth/register',
+            'add_user': '/auth/add-user',
             'login': '/auth/login',
             'change_password': '/auth/change-password',
             'forgot_password': '/auth/forgot-password',
-            'scrape': '/scrape-batch'
+            'scrape': '/scrape-batch',
+            'scrape_ai': '/scrape-batch-ai'
+        },
+        'ai_features': {
+            'headline_optimization': True,
+            'model': 'cerebras-llama3.1-8b',
+            'suggestions_per_headline': 10
         }
     })
 
@@ -787,6 +963,60 @@ def scrape_batch_endpoint():
     
     except Exception as e:
         logger.error(f"Batch API error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/scrape-batch-ai', methods=['POST'])
+def scrape_batch_ai_endpoint():
+    """
+    AI-enhanced batch scraping endpoint with headline optimization
+    Expects JSON: {"urls": ["https://example1.com", "https://example2.com"]}
+    Returns scraped data with AI-generated headline suggestions
+    """
+    try:
+        data = request.get_json()
+        
+        if not data or 'urls' not in data:
+            return jsonify({
+                'status': 'error',
+                'message': 'URLs array is required in request body'
+            }), 400
+        
+        urls = data['urls']
+        
+        if not isinstance(urls, list) or len(urls) == 0:
+            return jsonify({
+                'status': 'error',
+                'message': 'URLs must be a non-empty array'
+            }), 400
+        
+        if len(urls) > 5:  # Limit batch size for AI processing
+            return jsonify({
+                'status': 'error',
+                'message': 'Maximum 5 URLs allowed per AI-enhanced batch due to processing time'
+            }), 400
+        
+        results = []
+        for url in urls:
+            logger.info(f"Processing URL with AI enhancement: {url}")
+            result = scraper.scrape_website_with_ai(url, cerebras_ai)
+            results.append(result)
+        
+        return jsonify({
+            'status': 'success',
+            'data': results,
+            'ai_enhanced': True,
+            'processing_info': {
+                'total_urls': len(urls),
+                'ai_model': 'cerebras-llama3.1-8b',
+                'suggestions_per_headline': 10
+            }
+        })
+    
+    except Exception as e:
+        logger.error(f"AI-enhanced batch API error: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': 'Internal server error'

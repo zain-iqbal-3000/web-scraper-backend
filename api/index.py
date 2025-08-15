@@ -516,7 +516,134 @@ class WebScraper:
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
+        
+        # Common selectors for cookie popups and unwanted elements to exclude
+        self.excluded_selectors = [
+            # Cookie popup selectors
+            '[class*="cookie"]',
+            '[id*="cookie"]',
+            '[class*="gdpr"]',
+            '[id*="gdpr"]',
+            '[class*="consent"]',
+            '[id*="consent"]',
+            '[class*="privacy"]',
+            '[id*="privacy"]',
+            
+            # Common popup/overlay selectors
+            '[class*="popup"]',
+            '[id*="popup"]',
+            '[class*="modal"]',
+            '[id*="modal"]',
+            '[class*="overlay"]',
+            '[id*="overlay"]',
+            '[class*="banner"]',
+            '[id*="banner"]',
+            
+            # Notification bars
+            '[class*="notification"]',
+            '[id*="notification"]',
+            '[class*="alert"]',
+            '[id*="alert"]',
+            
+            # Common cookie popup class names
+            '.cookie-notice',
+            '.cookie-banner',
+            '.cookie-consent',
+            '.gdpr-notice',
+            '.privacy-notice',
+            '.consent-banner',
+            '.cookieconsent',
+            '.cc-window',
+            '.cc-banner',
+            '.optanon-alert-box-wrapper',
+            '.ot-sdk-container',
+            '.onetrust-pc-container',
+            
+            # Newsletter popups
+            '[class*="newsletter"]',
+            '[id*="newsletter"]',
+            '[class*="signup"]',
+            '[id*="signup"]',
+            
+            # Chat widgets
+            '[class*="chat"]',
+            '[id*="chat"]',
+            '[class*="intercom"]',
+            '[id*="intercom"]',
+            
+            # Ad blockers and promotional overlays
+            '[class*="promo"]',
+            '[id*="promo"]',
+            '[class*="advertisement"]',
+            '[id*="advertisement"]',
+            
+            # Navigation and menu elements
+            'nav',
+            '.nav',
+            '.navbar',
+            '.navigation',
+            '.menu',
+            '.header',
+            '.footer',
+            '.sidebar'
+        ]
     
+    
+    def _remove_unwanted_elements(self, soup):
+        """Remove cookie popups, modals, and other overlay elements"""
+        try:
+            # Remove elements by common selectors
+            for selector in self.excluded_selectors:
+                try:
+                    elements = soup.select(selector)
+                    for element in elements:
+                        element.decompose()
+                except Exception:
+                    # Continue if selector fails
+                    continue
+            
+            # Remove script and style tags
+            for script in soup(["script", "style", "noscript"]):
+                script.decompose()
+            
+            # Remove hidden elements (often popups)
+            for element in soup.find_all(style=True):
+                style = element.get('style', '').lower()
+                if any(hidden_style in style for hidden_style in [
+                    'display:none', 'display: none',
+                    'visibility:hidden', 'visibility: hidden',
+                    'opacity:0', 'opacity: 0'
+                ]):
+                    element.decompose()
+            
+            # Remove elements with common popup-related attributes
+            for element in soup.find_all():
+                # Check for popup-related attributes
+                class_names = ' '.join(element.get('class', [])).lower()
+                element_id = element.get('id', '').lower()
+                
+                popup_keywords = [
+                    'cookie', 'gdpr', 'consent', 'privacy', 'popup', 'modal',
+                    'overlay', 'banner', 'notification', 'alert', 'newsletter',
+                    'signup', 'chat', 'intercom', 'promo', 'advertisement'
+                ]
+                
+                if any(keyword in class_names or keyword in element_id for keyword in popup_keywords):
+                    element.decompose()
+            
+            # Remove elements with fixed positioning (often popups)
+            for element in soup.find_all():
+                style = element.get('style', '').lower()
+                if 'position:fixed' in style.replace(' ', '') or 'position: fixed' in style:
+                    element.decompose()
+            
+            logger.info(f"Removed unwanted elements (popups, cookies, overlays)")
+            return soup
+            
+        except Exception as e:
+            logger.error(f"Error removing unwanted elements: {str(e)}")
+            return soup
+
     def scrape_website(self, url):
         """
         Scrape a website and extract specific elements
@@ -533,6 +660,9 @@ class WebScraper:
             
             # Parse HTML
             soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Remove unwanted elements BEFORE extracting content
+            soup = self._remove_unwanted_elements(soup)
             
             # Extract data
             scraped_data = {
@@ -672,7 +802,7 @@ class WebScraper:
             elements = soup.select(selector)
             for element in elements:
                 text = element.get_text(strip=True)
-                if text and len(text) > 10:  # Filter out very short text
+                if self._is_valid_content(text, min_length=10, max_length=200):
                     headlines.append(text)
         
         return headlines[:3] if headlines else []
@@ -697,7 +827,7 @@ class WebScraper:
             elements = soup.select(selector)
             for element in elements:
                 text = element.get_text(strip=True)
-                if text and len(text) > 5:
+                if self._is_valid_content(text, min_length=5, max_length=300):
                     subheadlines.append(text)
         
         return subheadlines[:5] if subheadlines else []
@@ -739,13 +869,13 @@ class WebScraper:
                 elements = soup.select(selector)
                 for element in elements:
                     content = element.get('content', '')
-                    if content and len(content) > 20:
+                    if self._is_valid_content(content, min_length=20, max_length=500):
                         descriptions.append(content)
             else:
                 elements = soup.select(selector)
                 for element in elements:
                     text = element.get_text(strip=True)
-                    if text and len(text) > 20 and len(text) < 500:
+                    if self._is_valid_content(text, min_length=20, max_length=500):
                         # Clean the text
                         clean_text = re.sub(r'\s+', ' ', text).strip()
                         if clean_text not in descriptions:
@@ -772,9 +902,9 @@ class WebScraper:
             if len(text) > 5 and len(text) < 200:  # Filter reasonable length text
                 text_lower = text.lower()
                 
-                # Check if text contains CTA patterns
+                # Check if text contains CTA patterns and is not cookie-related
                 for pattern in cta_patterns:
-                    if re.search(pattern, text_lower, re.IGNORECASE):
+                    if re.search(pattern, text_lower, re.IGNORECASE) and self._is_valid_cta(text):
                         # Clean the text and add to CTAs
                         clean_text = re.sub(r'\s+', ' ', text).strip()
                         if clean_text not in ctas and len(clean_text) > 3:
@@ -796,12 +926,68 @@ class WebScraper:
             elements = soup.select(selector)
             for element in elements:
                 text = element.get_text(strip=True)
-                if text and len(text) > 2 and len(text) < 100:
+                if self._is_valid_cta(text):
                     clean_text = re.sub(r'\s+', ' ', text).strip()
                     if clean_text not in ctas:
                         ctas.append(clean_text)
         
         return ctas[:10] if ctas else []
+    
+    def _is_valid_content(self, text, min_length=10, max_length=500):
+        """Check if text is valid content (not popup/cookie related)"""
+        if not text or len(text) < min_length or len(text) > max_length:
+            return False
+        
+        # Filter out cookie/popup related text
+        popup_keywords = [
+            'cookie', 'cookies', 'gdpr', 'consent', 'privacy policy', 'accept', 'decline',
+            'continue', 'agree', 'disagree', 'necessary cookies', 'analytics',
+            'marketing cookies', 'third party', 'data processing', 'newsletter',
+            'subscribe', 'unsubscribe', 'popup', 'close', 'dismiss', 'manage cookies',
+            'cookie settings', 'privacy settings', 'cookie preferences', 'accept all',
+            'reject all', 'cookie notice', 'this website uses cookies', 'we use cookies',
+            'by continuing to use', 'cookie policy', 'data protection'
+        ]
+        
+        text_lower = text.lower()
+        if any(keyword in text_lower for keyword in popup_keywords):
+            return False
+        
+        # Filter out common navigation and menu items
+        nav_keywords = ['home', 'about', 'contact', 'menu', 'search', 'login', 'register', 'sign in', 'sign out']
+        if text_lower.strip() in nav_keywords:
+            return False
+        
+        # Filter out single words that are likely navigation
+        if len(text.split()) == 1 and len(text) < 15:
+            return False
+        
+        return True
+    
+    def _is_valid_cta(self, text):
+        """Check if text is a valid CTA (not popup/cookie related)"""
+        if not text or len(text) < 2 or len(text) > 100:
+            return False
+        
+        # Filter out cookie/popup CTAs
+        invalid_ctas = [
+            'accept', 'decline', 'agree', 'disagree', 'close', 'dismiss',
+            'ok', 'cancel', 'continue', 'accept all', 'reject all',
+            'manage cookies', 'cookie settings', 'privacy settings',
+            'allow all', 'deny all', 'cookie preferences', 'necessary only',
+            'save preferences', 'confirm choices'
+        ]
+        
+        if text.lower().strip() in invalid_ctas:
+            return False
+        
+        # Filter out if contains cookie-related keywords
+        cookie_keywords = ['cookie', 'gdpr', 'consent', 'privacy']
+        text_lower = text.lower()
+        if any(keyword in text_lower for keyword in cookie_keywords):
+            return False
+        
+        return True
 
 # Initialize scraper, Firebase auth, and AI
 scraper = WebScraper()

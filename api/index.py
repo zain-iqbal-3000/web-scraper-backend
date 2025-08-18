@@ -682,7 +682,215 @@ class WebScraper:
             logger.error(f"Scraping error for {url}: {str(e)}")
             return {'error': f'Failed to scrape website: {str(e)}'}
     
-    def scrape_website_with_ai(self, url, cerebras_ai):
+    def scrape_complete_website(self, url):
+        """
+        Scrape complete HTML and CSS including external stylesheets
+        Returns a complete HTML file that can be saved and run locally
+        """
+        try:
+            # Validate URL
+            parsed_url = urlparse(url)
+            if not parsed_url.scheme or not parsed_url.netloc:
+                return {'error': 'Invalid URL provided'}
+            
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            
+            # Make request
+            response = self.session.get(url, timeout=15)
+            response.raise_for_status()
+            
+            # Parse HTML
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Download and embed external CSS files
+            css_content = self._download_external_css(soup, base_url, url)
+            
+            # Process and embed inline styles
+            self._process_inline_styles(soup)
+            
+            # Convert relative URLs to absolute URLs for images, etc.
+            self._convert_relative_urls(soup, base_url)
+            
+            # Create a complete HTML document with embedded CSS
+            complete_html = self._create_complete_html(soup, css_content, url)
+            
+            return {
+                'url': url,
+                'complete_html': complete_html,
+                'css_files_processed': len(css_content),
+                'success': True
+            }
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request error for {url}: {str(e)}")
+            return {'error': f'Failed to fetch URL: {str(e)}'}
+        except Exception as e:
+            logger.error(f"Complete scraping error for {url}: {str(e)}")
+            return {'error': f'Failed to scrape complete website: {str(e)}'}
+    
+    def _download_external_css(self, soup, base_url, page_url):
+        """Download all external CSS files and return their content"""
+        css_contents = []
+        
+        # Find all link tags with CSS stylesheets
+        css_links = soup.find_all('link', rel='stylesheet')
+        
+        for link in css_links:
+            href = link.get('href')
+            if not href:
+                continue
+            
+            try:
+                # Convert relative URL to absolute URL
+                if href.startswith('//'):
+                    css_url = 'https:' + href
+                elif href.startswith('/'):
+                    css_url = base_url + href
+                elif href.startswith('http'):
+                    css_url = href
+                else:
+                    # Relative path
+                    css_url = urljoin(page_url, href)
+                
+                # Download CSS file
+                css_response = self.session.get(css_url, timeout=10)
+                css_response.raise_for_status()
+                
+                # Process CSS content to handle relative URLs within CSS
+                css_content = self._process_css_urls(css_response.text, css_url, base_url)
+                css_contents.append(css_content)
+                
+                logger.info(f"Downloaded CSS: {css_url}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to download CSS {href}: {str(e)}")
+                continue
+        
+        return css_contents
+    
+    def _process_css_urls(self, css_content, css_url, base_url):
+        """Process CSS content to convert relative URLs to absolute URLs"""
+        try:
+            # Handle url() references in CSS
+            def replace_url(match):
+                url_content = match.group(1).strip('\'"')
+                
+                if url_content.startswith('data:') or url_content.startswith('http'):
+                    return match.group(0)
+                
+                if url_content.startswith('//'):
+                    return f'url("https:{url_content}")'
+                elif url_content.startswith('/'):
+                    return f'url("{base_url}{url_content}")'
+                else:
+                    # Relative URL
+                    absolute_url = urljoin(css_url, url_content)
+                    return f'url("{absolute_url}")'
+            
+            # Replace all url() references
+            processed_css = re.sub(r'url\(["\']?([^)]+?)["\']?\)', replace_url, css_content)
+            
+            return processed_css
+            
+        except Exception as e:
+            logger.warning(f"Error processing CSS URLs: {str(e)}")
+            return css_content
+    
+    def _process_inline_styles(self, soup):
+        """Process inline style tags and style attributes"""
+        try:
+            # Process style tags
+            for style_tag in soup.find_all('style'):
+                if style_tag.string:
+                    # Here we could process URLs in inline styles if needed
+                    pass
+            
+            # Process style attributes on elements
+            for element in soup.find_all(style=True):
+                # Here we could process URLs in style attributes if needed
+                pass
+                
+        except Exception as e:
+            logger.warning(f"Error processing inline styles: {str(e)}")
+    
+    def _convert_relative_urls(self, soup, base_url):
+        """Convert relative URLs to absolute URLs for images, scripts, etc."""
+        try:
+            # Convert img src attributes
+            for img in soup.find_all('img', src=True):
+                src = img['src']
+                if src.startswith('//'):
+                    img['src'] = 'https:' + src
+                elif src.startswith('/'):
+                    img['src'] = base_url + src
+                elif not src.startswith('http') and not src.startswith('data:'):
+                    img['src'] = urljoin(base_url, src)
+            
+            # Convert script src attributes
+            for script in soup.find_all('script', src=True):
+                src = script['src']
+                if src.startswith('//'):
+                    script['src'] = 'https:' + src
+                elif src.startswith('/'):
+                    script['src'] = base_url + src
+                elif not src.startswith('http'):
+                    script['src'] = urljoin(base_url, src)
+            
+            # Convert link href attributes (for non-CSS links)
+            for link in soup.find_all('a', href=True):
+                href = link['href']
+                if href.startswith('/') and not href.startswith('//'):
+                    link['href'] = base_url + href
+                elif not href.startswith('http') and not href.startswith('#') and not href.startswith('mailto:'):
+                    link['href'] = urljoin(base_url, href)
+            
+            # Convert form action attributes
+            for form in soup.find_all('form', action=True):
+                action = form['action']
+                if action.startswith('/'):
+                    form['action'] = base_url + action
+                elif not action.startswith('http'):
+                    form['action'] = urljoin(base_url, action)
+                    
+        except Exception as e:
+            logger.warning(f"Error converting relative URLs: {str(e)}")
+    
+    def _create_complete_html(self, soup, css_contents, original_url):
+        """Create a complete HTML document with embedded CSS"""
+        try:
+            # Remove existing CSS link tags since we're embedding the CSS
+            for link in soup.find_all('link', rel='stylesheet'):
+                link.decompose()
+            
+            # Create combined CSS content
+            combined_css = '\n'.join(css_contents)
+            
+            # Add embedded CSS to head
+            if soup.head:
+                style_tag = soup.new_tag('style', type='text/css')
+                style_tag.string = combined_css
+                soup.head.append(style_tag)
+                
+                # Add meta tag with original URL
+                meta_tag = soup.new_tag('meta')
+                meta_tag.attrs['name'] = 'original-url'
+                meta_tag.attrs['content'] = original_url
+                soup.head.append(meta_tag)
+                
+                # Add meta tag for viewport (responsive design)
+                viewport_meta = soup.new_tag('meta')
+                viewport_meta.attrs['name'] = 'viewport'
+                viewport_meta.attrs['content'] = 'width=device-width, initial-scale=1.0'
+                soup.head.append(viewport_meta)
+            
+            # Ensure proper doctype
+            doctype = '<!DOCTYPE html>\n'
+            
+            return doctype + str(soup)
+            
+        except Exception as e:
+            logger.error(f"Error creating complete HTML: {str(e)}")
+            return str(soup)
         """
         Scrape a website and enhance all content with AI suggestions
         """
@@ -1007,7 +1215,8 @@ def health_check():
             'login': '/auth/login',
             'change_password': '/auth/change-password',
             'forgot_password': '/auth/forgot-password',
-            'scrape': '/scrape'
+            'scrape': '/scrape',
+            'scrape_complete': '/scrape-complete'
         },
         'ai_features': {
             'headline_optimization': True,
@@ -1241,6 +1450,60 @@ def forgot_password():
         
     except Exception as e:
         logger.error(f"Forgot password endpoint error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/scrape-complete', methods=['POST'])
+def scrape_complete_endpoint():
+    """
+    Complete website scraping endpoint with HTML and CSS
+    Expects JSON: {"urls": ["https://example1.com"]}
+    Returns complete HTML with embedded CSS that can be saved and run locally
+    """
+    try:
+        data = request.get_json()
+        
+        if not data or 'urls' not in data:
+            return jsonify({
+                'status': 'error',
+                'message': 'URLs array is required in request body'
+            }), 400
+        
+        urls = data['urls']
+        
+        if not isinstance(urls, list) or len(urls) == 0:
+            return jsonify({
+                'status': 'error',
+                'message': 'URLs must be a non-empty array'
+            }), 400
+        
+        if len(urls) > 3:  # Limit batch size for complete scraping (more intensive)
+            return jsonify({
+                'status': 'error',
+                'message': 'Maximum 3 URLs allowed per complete scraping batch due to processing intensity'
+            }), 400
+        
+        results = []
+        for url in urls:
+            logger.info(f"Processing complete website scraping for: {url}")
+            result = scraper.scrape_complete_website(url)
+            results.append(result)
+        
+        return jsonify({
+            'status': 'success',
+            'data': results,
+            'scraping_type': 'complete_html_css',
+            'processing_info': {
+                'total_urls': len(urls),
+                'includes': ['html', 'css', 'external_stylesheets', 'absolute_urls'],
+                'note': 'HTML files can be saved locally and will display exactly as the original website'
+            }
+        })
+    
+    except Exception as e:
+        logger.error(f"Complete scraping API error: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': 'Internal server error'

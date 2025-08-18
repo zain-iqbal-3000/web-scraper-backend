@@ -1,4 +1,4 @@
-# Web Scraper Batch API
+  # Web Scraper Batch API
 
 A Flask-based web scraper API that extracts headlines, subheadlines, call-to-action text, and credibility information from websites. Optimized for Vercel deployment.
 

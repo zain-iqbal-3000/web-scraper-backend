@@ -1197,6 +1197,105 @@ class WebScraper:
         
         return True
 
+    def scrape_website_with_ai(self, url, cerebras_ai):
+        """
+        Scrape a website and enhance all content with AI suggestions
+        """
+        try:
+            # First, do the regular scraping
+            scraped_data = self.scrape_website(url)
+            if 'error' in scraped_data:
+                return scraped_data
+            
+            # Enhance all content with AI suggestions
+            enhanced_data = scraped_data.copy()
+            
+            # Process headlines
+            if scraped_data.get('headline'):
+                enhanced_headlines = []
+                for headline in scraped_data['headline']:
+                    ai_result = cerebras_ai.generate_content_suggestions(
+                        headline, 
+                        "headline",
+                        context=f"Website: {url}"
+                    )
+                    
+                    headline_data = {
+                        'original': headline,
+                        'ai_suggestions': ai_result.get('suggestions', []) if 'success' in ai_result else [],
+                        'ai_error': ai_result.get('error') if 'error' in ai_result else None
+                    }
+                    enhanced_headlines.append(headline_data)
+                
+                enhanced_data['headline'] = enhanced_headlines
+            
+            # Process subheadlines
+            if scraped_data.get('subheadline'):
+                enhanced_subheadlines = []
+                for subheadline in scraped_data['subheadline']:
+                    ai_result = cerebras_ai.generate_content_suggestions(
+                        subheadline,
+                        "subheadline",
+                        context=f"Website: {url}"
+                    )
+                    
+                    subheadline_data = {
+                        'original': subheadline,
+                        'ai_suggestions': ai_result.get('suggestions', []) if 'success' in ai_result else [],
+                        'ai_error': ai_result.get('error') if 'error' in ai_result else None
+                    }
+                    enhanced_subheadlines.append(subheadline_data)
+                
+                enhanced_data['subheadline'] = enhanced_subheadlines
+            
+            # Process descriptions/credibility content
+            if scraped_data.get('description_credibility'):
+                enhanced_descriptions = []
+                for description in scraped_data['description_credibility']:
+                    ai_result = cerebras_ai.generate_content_suggestions(
+                        description,
+                        "description",
+                        context=f"Website: {url}"
+                    )
+                    
+                    description_data = {
+                        'original': description,
+                        'ai_suggestions': ai_result.get('suggestions', []) if 'success' in ai_result else [],
+                        'ai_error': ai_result.get('error') if 'error' in ai_result else None
+                    }
+                    enhanced_descriptions.append(description_data)
+                
+                enhanced_data['description_credibility'] = enhanced_descriptions
+            
+            # Process call-to-action content
+            if scraped_data.get('call_to_action'):
+                enhanced_ctas = []
+                for cta in scraped_data['call_to_action']:
+                    ai_result = cerebras_ai.generate_content_suggestions(
+                        cta,
+                        "cta",
+                        context=f"Website: {url}"
+                    )
+                    
+                    cta_data = {
+                        'original': cta,
+                        'ai_suggestions': ai_result.get('suggestions', []) if 'success' in ai_result else [],
+                        'ai_error': ai_result.get('error') if 'error' in ai_result else None
+                    }
+                    enhanced_ctas.append(cta_data)
+                
+                enhanced_data['call_to_action'] = enhanced_ctas
+            
+            # Add metadata
+            enhanced_data['ai_enhanced'] = True
+            enhanced_data['processing_timestamp'] = datetime.utcnow().isoformat() + "Z"
+            
+            return enhanced_data
+            
+        except Exception as e:
+            logger.error(f"AI-enhanced scraping error for {url}: {str(e)}")
+            return {'error': f'Failed to scrape website with AI enhancement: {str(e)}'}
+
 # Initialize scraper, Firebase auth, and AI
 scraper = WebScraper()
 firebase_auth = FirebaseAuth()

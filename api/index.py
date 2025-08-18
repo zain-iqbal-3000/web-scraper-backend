@@ -22,7 +22,7 @@ FIREBASE_PROJECT_ID = os.environ.get('FIREBASE_PROJECT_ID', 'lp-optimization-97f
 FIREBASE_AUTH_DOMAIN = f"{FIREBASE_PROJECT_ID}.firebaseapp.com"
 
 # Cerebras AI configuration
-CEREBRAS_API_KEY = os.environ.get('CEREBRAS_API_KEY', 'csk-t5dtmc52cd435fke365yh26np2fmryhwxwdfkc9mjn236vvp')
+CEREBRAS_API_KEY = os.environ.get('CEREBRAS_API_KEY', 'csk-rkhkxny26c6rvj32cfd4wtwf8n3w8drncpx9j88dkk66fre6')
 CEREBRAS_API_URL = 'https://api.cerebras.ai/v1/chat/completions'
 
 # Firebase Authentication Class

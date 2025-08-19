@@ -3,7 +3,7 @@ from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, quote
 import logging
 import os
 import json
@@ -698,13 +698,18 @@ class WebScraper:
             # Remove unwanted elements BEFORE extracting content
             soup = self._remove_unwanted_elements(soup)
             
-            # Extract data
+            # Extract data with safety checks
+            headline = self._extract_headline(soup)
+            subheadline = self._extract_subheadline(soup)
+            cta = self._extract_call_to_action(soup)
+            description = self._extract_description_credibility(soup)
+            
             scraped_data = {
                 'html': str(soup),
-                'headline': self._extract_headline(soup),
-                'subheadline': self._extract_subheadline(soup),
-                'call_to_action': self._extract_call_to_action(soup),
-                'description_credibility': self._extract_description_credibility(soup)
+                'headline': headline if isinstance(headline, list) else [],
+                'subheadline': subheadline if isinstance(subheadline, list) else [],
+                'call_to_action': cta if isinstance(cta, list) else [],
+                'description_credibility': description if isinstance(description, list) else []
             }
             
             return scraped_data
@@ -802,23 +807,36 @@ class WebScraper:
         
         return css_contents
     
-    def _process_css_urls(self, css_content, css_url, base_url):
-        """Process CSS content to convert relative URLs to absolute URLs"""
+    def _process_css_urls(self, css_content, css_url, base_url, use_font_proxy=True):
+        """Process CSS content to convert relative URLs to absolute URLs and optionally use font proxy"""
         try:
             # Handle url() references in CSS
             def replace_url(match):
                 url_content = match.group(1).strip('\'"')
                 
-                if url_content.startswith('data:') or url_content.startswith('http'):
+                if url_content.startswith('data:'):
                     return match.group(0)
                 
-                if url_content.startswith('//'):
-                    return f'url("https:{url_content}")'
+                # Build absolute URL first
+                if url_content.startswith('http'):
+                    absolute_url = url_content
+                elif url_content.startswith('//'):
+                    absolute_url = 'https:' + url_content
                 elif url_content.startswith('/'):
-                    return f'url("{base_url}{url_content}")'
+                    absolute_url = base_url + url_content
                 else:
                     # Relative URL
                     absolute_url = urljoin(css_url, url_content)
+                
+                # Check if this is a font file and use proxy if enabled
+                font_extensions = ['.woff2', '.woff', '.ttf', '.otf', '.eot']
+                is_font = any(absolute_url.lower().endswith(ext) for ext in font_extensions)
+                
+                if use_font_proxy and is_font and not absolute_url.startswith('data:'):
+                    # Use our font proxy to avoid CORS issues
+                    proxy_url = f'/proxy-font?url={quote(absolute_url, safe="")}'
+                    return f'url("{proxy_url}")'
+                else:
                     return f'url("{absolute_url}")'
             
             # Replace all url() references
@@ -1638,11 +1656,11 @@ def scrape_complete_endpoint():
             'scraping_type': 'complete_html_css',
             'processing_info': {
                 'total_urls': len(urls),
-                'includes': ['html', 'css', 'external_stylesheets', 'absolute_urls'],
-                'cors_solution': 'Use /proxy-font endpoint for external fonts to avoid CORS errors',
-                'font_proxy_usage': 'Replace font URLs with: /proxy-font?url=<external_font_url>',
-                'supported_fonts': ['.woff2', '.woff', '.ttf', '.otf', '.eot', '.svg'],
-                'note': 'HTML files can be saved locally. Use font proxy for external fonts to prevent CORS issues.'
+                'includes': ['html', 'css', 'external_stylesheets', 'absolute_urls', 'auto_font_proxy'],
+                'cors_solution': 'Font URLs automatically converted to proxy URLs to prevent CORS errors',
+                'font_proxy_automatic': True,
+                'supported_fonts': ['.woff2', '.woff', '.ttf', '.otf', '.eot'],
+                'note': 'HTML files include automatic font proxying. No manual setup needed for CORS.'
             }
         })
     

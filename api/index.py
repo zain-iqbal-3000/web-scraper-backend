@@ -10,7 +10,41 @@ import json
 from datetime import datetime
 
 app = Flask(__name__)
-CORS(app)
+
+# Configure CORS with comprehensive settings for font loading
+CORS(app, 
+     origins=['*'],  # Allow all origins for development
+     allow_headers=['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
+     methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+     supports_credentials=True,
+     expose_headers=['Content-Type', 'Content-Length', 'Access-Control-Allow-Origin']
+)
+
+# Add headers to help with font loading and CORS issues
+@app.after_request
+def after_request(response):
+    """Add headers to prevent CORS issues with fonts and external resources"""
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,Accept,Origin,X-Requested-With')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    
+    # Add specific headers for font loading
+    response.headers.add('Access-Control-Allow-Headers', 'Range')
+    response.headers.add('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Encoding, Content-Length, Content-Range')
+    
+    # Add Content Security Policy headers to allow font loading
+    csp_directives = [
+        "default-src 'self' 'unsafe-inline' 'unsafe-eval' *",
+        "font-src 'self' data: *",
+        "style-src 'self' 'unsafe-inline' *",
+        "img-src 'self' data: *",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' *",
+        "connect-src 'self' *"
+    ]
+    response.headers.add('Content-Security-Policy', '; '.join(csp_directives))
+    
+    return response
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -1307,7 +1341,7 @@ def health_check():
     return jsonify({
         'status': 'success',
         'message': 'Web Scraper API with Firebase Auth and AI Enhancement is running',
-        'version': '3.0.0',
+        'version': '3.1.0',
         'endpoints': {
             'register': '/auth/register',
             'add_user': '/auth/add-user',
@@ -1315,7 +1349,8 @@ def health_check():
             'change_password': '/auth/change-password',
             'forgot_password': '/auth/forgot-password',
             'scrape': '/scrape',
-            'scrape_complete': '/scrape-complete'
+            'scrape_complete': '/scrape-complete',
+            'proxy_font': '/proxy-font?url=<font_url>'
         },
         'ai_features': {
             'headline_optimization': True,
@@ -1325,6 +1360,13 @@ def health_check():
             'model': 'cerebras-llama3.1-8b',
             'suggestions_per_item': 10,
             'content_types_supported': ['headline', 'subheadline', 'description', 'cta']
+        },
+        'cors_solutions': {
+            'comprehensive_cors_headers': True,
+            'content_security_policy': True,
+            'font_proxy_endpoint': '/proxy-font',
+            'supported_font_formats': ['.woff2', '.woff', '.ttf', '.otf', '.eot', '.svg'],
+            'description': 'Solves CORS issues for external fonts and resources'
         }
     })
 
@@ -1597,7 +1639,10 @@ def scrape_complete_endpoint():
             'processing_info': {
                 'total_urls': len(urls),
                 'includes': ['html', 'css', 'external_stylesheets', 'absolute_urls'],
-                'note': 'HTML files can be saved locally and will display exactly as the original website'
+                'cors_solution': 'Use /proxy-font endpoint for external fonts to avoid CORS errors',
+                'font_proxy_usage': 'Replace font URLs with: /proxy-font?url=<external_font_url>',
+                'supported_fonts': ['.woff2', '.woff', '.ttf', '.otf', '.eot', '.svg'],
+                'note': 'HTML files can be saved locally. Use font proxy for external fonts to prevent CORS issues.'
             }
         })
     
@@ -1658,6 +1703,82 @@ def scrape_endpoint():
     
     except Exception as e:
         logger.error(f"AI-enhanced scraping API error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/proxy-font', methods=['GET'])
+def proxy_font():
+    """
+    CORS proxy endpoint for loading external fonts
+    Usage: /proxy-font?url=https://example.com/font.woff2
+    """
+    try:
+        font_url = request.args.get('url')
+        
+        if not font_url:
+            return jsonify({
+                'status': 'error',
+                'message': 'URL parameter is required'
+            }), 400
+        
+        # Validate URL
+        if not font_url.startswith('http'):
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid URL provided'
+            }), 400
+        
+        # Check if it's a font file
+        font_extensions = ['.woff2', '.woff', '.ttf', '.otf', '.eot', '.svg']
+        if not any(font_url.lower().endswith(ext) for ext in font_extensions):
+            return jsonify({
+                'status': 'error',
+                'message': 'URL must point to a font file'
+            }), 400
+        
+        # Download the font file
+        response = requests.get(font_url, timeout=10)
+        response.raise_for_status()
+        
+        # Determine content type based on file extension
+        content_types = {
+            '.woff2': 'font/woff2',
+            '.woff': 'font/woff',
+            '.ttf': 'font/ttf',
+            '.otf': 'font/otf',
+            '.eot': 'application/vnd.ms-fontobject',
+            '.svg': 'image/svg+xml'
+        }
+        
+        content_type = 'font/woff2'  # default
+        for ext, ct in content_types.items():
+            if font_url.lower().endswith(ext):
+                content_type = ct
+                break
+        
+        # Return the font file with proper headers
+        from flask import Response
+        return Response(
+            response.content,
+            mimetype=content_type,
+            headers={
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET',
+                'Cache-Control': 'public, max-age=31536000',  # Cache for 1 year
+                'Content-Length': str(len(response.content))
+            }
+        )
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Font proxy error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Failed to fetch font: {str(e)}'
+        }), 502
+    except Exception as e:
+        logger.error(f"Font proxy error: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': 'Internal server error'

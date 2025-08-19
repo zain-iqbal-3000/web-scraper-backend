@@ -3,46 +3,14 @@ from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 import re
-from urllib.parse import urljoin, urlparse, quote
+from urllib.parse import urljoin, urlparse
 import logging
 import os
 import json
 from datetime import datetime
 
 app = Flask(__name__)
-
-# Configure CORS with comprehensive settings for font loading
-CORS(app, 
-     origins=['*'],  # Allow all origins for development
-     allow_headers=['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
-     methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-     supports_credentials=True,
-     expose_headers=['Content-Type', 'Content-Length', 'Access-Control-Allow-Origin']
-)
-
-# Add headers to help with font loading and CORS issues
-@app.after_request
-def after_request(response):
-    """Add headers to prevent CORS issues with fonts and external resources"""
-    # Don't duplicate CORS headers that Flask-CORS already sets
-    # Only add specific headers for font loading and CSP
-    
-    # Add specific headers for font loading (use set to avoid duplicates)
-    response.headers.set('Access-Control-Allow-Headers', 'Content-Type,Authorization,Accept,Origin,X-Requested-With,Range')
-    response.headers.set('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Encoding, Content-Length, Content-Range')
-    
-    # Add Content Security Policy headers to allow font loading
-    csp_directives = [
-        "default-src 'self' 'unsafe-inline' 'unsafe-eval' *",
-        "font-src 'self' data: *",
-        "style-src 'self' 'unsafe-inline' *",
-        "img-src 'self' data: *",
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval' *",
-        "connect-src 'self' *"
-    ]
-    response.headers.set('Content-Security-Policy', '; '.join(csp_directives))
-    
-    return response
+CORS(app)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -696,18 +664,13 @@ class WebScraper:
             # Remove unwanted elements BEFORE extracting content
             soup = self._remove_unwanted_elements(soup)
             
-            # Extract data with safety checks
-            headline = self._extract_headline(soup)
-            subheadline = self._extract_subheadline(soup)
-            cta = self._extract_call_to_action(soup)
-            description = self._extract_description_credibility(soup)
-            
+            # Extract data
             scraped_data = {
                 'html': str(soup),
-                'headline': headline if isinstance(headline, list) else [],
-                'subheadline': subheadline if isinstance(subheadline, list) else [],
-                'call_to_action': cta if isinstance(cta, list) else [],
-                'description_credibility': description if isinstance(description, list) else []
+                'headline': self._extract_headline(soup),
+                'subheadline': self._extract_subheadline(soup),
+                'call_to_action': self._extract_call_to_action(soup),
+                'description_credibility': self._extract_description_credibility(soup)
             }
             
             return scraped_data
@@ -794,7 +757,7 @@ class WebScraper:
                 css_response.raise_for_status()
                 
                 # Process CSS content to handle relative URLs within CSS
-                css_content = self._process_css_urls(css_response.text, css_url, base_url, use_font_proxy=False)
+                css_content = self._process_css_urls(css_response.text, css_url, base_url)
                 css_contents.append(css_content)
                 
                 logger.info(f"Downloaded CSS: {css_url}")
@@ -805,45 +768,73 @@ class WebScraper:
         
         return css_contents
     
-    def _process_css_urls(self, css_content, css_url, base_url, use_font_proxy=True):
-        """Process CSS content to convert relative URLs to absolute URLs and optionally use font proxy"""
+    def _process_css_urls(self, css_content, css_url, base_url):
+        """Process CSS content to convert relative URLs to absolute URLs"""
         try:
             # Handle url() references in CSS
             def replace_url(match):
                 url_content = match.group(1).strip('\'"')
                 
-                if url_content.startswith('data:'):
+                if url_content.startswith('data:') or url_content.startswith('http'):
                     return match.group(0)
                 
-                # Build absolute URL first
-                if url_content.startswith('http'):
-                    absolute_url = url_content
-                elif url_content.startswith('//'):
-                    absolute_url = 'https:' + url_content
+                if url_content.startswith('//'):
+                    return f'url("https:{url_content}")'
                 elif url_content.startswith('/'):
-                    absolute_url = base_url + url_content
+                    return f'url("{base_url}{url_content}")'
                 else:
                     # Relative URL
                     absolute_url = urljoin(css_url, url_content)
-                
-                # Check if this is a font file and use proxy if enabled
-                font_extensions = ['.woff2', '.woff', '.ttf', '.otf', '.eot']
-                is_font = any(absolute_url.lower().endswith(ext) for ext in font_extensions)
-                
-                if use_font_proxy and is_font and not absolute_url.startswith('data:'):
-                    # Use our font proxy to avoid CORS issues
-                    proxy_url = f'/proxy-font?url={quote(absolute_url, safe="")}'
-                    return f'url("{proxy_url}")'
-                else:
                     return f'url("{absolute_url}")'
             
             # Replace all url() references
             processed_css = re.sub(r'url\(["\']?([^)]+?)["\']?\)', replace_url, css_content)
             
+            # CORS fix: Remove problematic @font-face rules that cause CORS errors
+            processed_css = self._fix_cors_fonts(processed_css)
+            
             return processed_css
             
         except Exception as e:
             logger.warning(f"Error processing CSS URLs: {str(e)}")
+            return css_content
+    
+    def _fix_cors_fonts(self, css_content):
+        """Fix CORS font issues by replacing external font URLs with system fonts"""
+        try:
+            # Remove or modify @font-face rules that cause CORS issues
+            font_face_pattern = r'@font-face\s*\{[^}]*\}'
+            
+            def replace_font_face(match):
+                font_face_rule = match.group(0)
+                # If it contains external URLs that cause CORS issues, comment it out
+                if 'wp-content/themes' in font_face_rule or 'fontawesome' in font_face_rule:
+                    return f'/* CORS blocked font: {font_face_rule} */'
+                return font_face_rule
+            
+            # Replace problematic @font-face rules
+            processed_css = re.sub(font_face_pattern, replace_font_face, css_content, flags=re.IGNORECASE | re.DOTALL)
+            
+            # Add fallback font declarations
+            fallback_fonts = '''
+            
+            /* CORS-safe system font fallbacks */
+            body, html, * {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif !important;
+            }
+            
+            .fa, .fas, .far, .fab, .fal, .fontawesome {
+                font-family: "Font Awesome 5 Free", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+                font-weight: 900 !important;
+            }
+            '''
+            
+            processed_css += fallback_fonts
+            
+            return processed_css
+            
+        except Exception as e:
+            logger.warning(f"Error fixing CORS fonts: {str(e)}")
             return css_content
     
     def _process_inline_styles(self, soup):
@@ -933,40 +924,59 @@ class WebScraper:
                 viewport_meta.attrs['content'] = 'width=device-width, initial-scale=1.0'
                 soup.head.append(viewport_meta)
                 
-                # Add CORS bypass meta tags
-                cors_meta = soup.new_tag('meta')
-                cors_meta.attrs['http-equiv'] = 'Content-Security-Policy'
-                cors_meta.attrs['content'] = "font-src 'self' data: *; style-src 'self' 'unsafe-inline' *; img-src 'self' data: *;"
-                soup.head.append(cors_meta)
+                # Add CORS fix for external fonts
+                cors_style = soup.new_tag('style', type='text/css')
+                cors_style.string = '''
+                /* CORS fix for external fonts */
+                @font-face {
+                    font-display: optional;
+                }
+                /* Override external font loading with system fonts as fallback */
+                * {
+                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif !important;
+                }
+                '''
+                soup.head.append(cors_style)
                 
-                # Add referrer policy to help with CORS
-                referrer_meta = soup.new_tag('meta')
-                referrer_meta.attrs['name'] = 'referrer'
-                referrer_meta.attrs['content'] = 'no-referrer'
-                soup.head.append(referrer_meta)
-                
-                # Add CORS bypass script
+                # Add script to handle CORS font loading issues
                 cors_script = soup.new_tag('script')
                 cors_script.string = '''
-                // CORS bypass for fonts and external resources
+                // Handle CORS font loading errors gracefully
                 (function() {
-                    // Override fetch to add CORS headers
-                    const originalFetch = window.fetch;
-                    window.fetch = function(...args) {
-                        if (args[1]) {
-                            args[1].mode = 'no-cors';
-                        } else {
-                            args[1] = { mode: 'no-cors' };
+                    // Catch and suppress font loading errors
+                    window.addEventListener('error', function(e) {
+                        if (e.target && (e.target.tagName === 'LINK' || e.target.src)) {
+                            var src = e.target.href || e.target.src || '';
+                            if (src.includes('.woff') || src.includes('.ttf') || src.includes('.otf') || src.includes('.eot')) {
+                                console.log('Font loading blocked by CORS, using system fonts');
+                                e.preventDefault();
+                                return false;
+                            }
                         }
-                        return originalFetch.apply(this, args);
-                    };
+                    }, true);
                     
-                    // Add CORS headers to document
+                    // Remove @font-face rules that cause CORS issues
                     document.addEventListener('DOMContentLoaded', function() {
-                        const meta = document.createElement('meta');
-                        meta.setAttribute('name', 'Access-Control-Allow-Origin');
-                        meta.setAttribute('content', '*');
-                        document.head.appendChild(meta);
+                        try {
+                            var sheets = document.styleSheets;
+                            for (var i = 0; i < sheets.length; i++) {
+                                try {
+                                    var rules = sheets[i].cssRules || sheets[i].rules;
+                                    for (var j = rules.length - 1; j >= 0; j--) {
+                                        if (rules[j].type === CSSRule.FONT_FACE_RULE) {
+                                            var src = rules[j].style.src;
+                                            if (src && (src.includes('maprimerenovsolaire.fr') || src.includes('wp-content/themes'))) {
+                                                sheets[i].deleteRule(j);
+                                            }
+                                        }
+                                    }
+                                } catch (e) {
+                                    // CORS blocked, skip this stylesheet
+                                }
+                            }
+                        } catch (e) {
+                            console.log('Font cleanup completed');
+                        }
                     });
                 })();
                 '''
@@ -1396,7 +1406,7 @@ def health_check():
     return jsonify({
         'status': 'success',
         'message': 'Web Scraper API with Firebase Auth and AI Enhancement is running',
-        'version': '3.1.0',
+        'version': '3.0.0',
         'endpoints': {
             'register': '/auth/register',
             'add_user': '/auth/add-user',
@@ -1404,8 +1414,7 @@ def health_check():
             'change_password': '/auth/change-password',
             'forgot_password': '/auth/forgot-password',
             'scrape': '/scrape',
-            'scrape_complete': '/scrape-complete',
-            'proxy_font': '/proxy-font?url=<font_url>'
+            'scrape_complete': '/scrape-complete'
         },
         'ai_features': {
             'headline_optimization': True,
@@ -1415,13 +1424,6 @@ def health_check():
             'model': 'cerebras-llama3.1-8b',
             'suggestions_per_item': 10,
             'content_types_supported': ['headline', 'subheadline', 'description', 'cta']
-        },
-        'cors_solutions': {
-            'comprehensive_cors_headers': True,
-            'content_security_policy': True,
-            'font_proxy_endpoint': '/proxy-font',
-            'supported_font_formats': ['.woff2', '.woff', '.ttf', '.otf', '.eot', '.svg'],
-            'description': 'Solves CORS issues for external fonts and resources'
         }
     })
 
@@ -1687,33 +1689,16 @@ def scrape_complete_endpoint():
             result = scraper.scrape_complete_website(url)
             results.append(result)
         
-        from flask import Response
-        response_data = {
+        return jsonify({
             'status': 'success',
             'data': results,
             'scraping_type': 'complete_html_css',
             'processing_info': {
                 'total_urls': len(urls),
-                'includes': ['html', 'css', 'external_stylesheets', 'absolute_urls', 'cors_headers'],
-                'cors_solution': 'Enhanced CORS headers and CSP policies to allow external resource loading',
-                'cors_bypass_included': True,
-                'supported_fonts': ['.woff2', '.woff', '.ttf', '.otf', '.eot'],
-                'note': 'HTML includes CORS bypass headers and meta tags for external resources.'
+                'includes': ['html', 'css', 'external_stylesheets', 'absolute_urls'],
+                'note': 'HTML files can be saved locally and will display exactly as the original website'
             }
-        }
-        
-        response = Response(
-            response=json.dumps(response_data),
-            status=200,
-            mimetype='application/json',
-            headers={
-                'Content-Security-Policy': "font-src 'self' data: *; style-src 'self' 'unsafe-inline' *; img-src 'self' data: *; default-src 'self' 'unsafe-inline' 'unsafe-eval' *;",
-                'Referrer-Policy': 'no-referrer',
-                'Cross-Origin-Resource-Policy': 'cross-origin',
-                'Cross-Origin-Embedder-Policy': 'unsafe-none'
-            }
-        )
-        return response
+        })
     
     except Exception as e:
         logger.error(f"Complete scraping API error: {str(e)}")
@@ -1772,82 +1757,6 @@ def scrape_endpoint():
     
     except Exception as e:
         logger.error(f"AI-enhanced scraping API error: {str(e)}")
-        return jsonify({
-            'status': 'error',
-            'message': 'Internal server error'
-        }), 500
-
-@app.route('/proxy-font', methods=['GET'])
-def proxy_font():
-    """
-    CORS proxy endpoint for loading external fonts
-    Usage: /proxy-font?url=https://example.com/font.woff2
-    """
-    try:
-        font_url = request.args.get('url')
-        
-        if not font_url:
-            return jsonify({
-                'status': 'error',
-                'message': 'URL parameter is required'
-            }), 400
-        
-        # Validate URL
-        if not font_url.startswith('http'):
-            return jsonify({
-                'status': 'error',
-                'message': 'Invalid URL provided'
-            }), 400
-        
-        # Check if it's a font file
-        font_extensions = ['.woff2', '.woff', '.ttf', '.otf', '.eot', '.svg']
-        if not any(font_url.lower().endswith(ext) for ext in font_extensions):
-            return jsonify({
-                'status': 'error',
-                'message': 'URL must point to a font file'
-            }), 400
-        
-        # Download the font file
-        response = requests.get(font_url, timeout=10)
-        response.raise_for_status()
-        
-        # Determine content type based on file extension
-        content_types = {
-            '.woff2': 'font/woff2',
-            '.woff': 'font/woff',
-            '.ttf': 'font/ttf',
-            '.otf': 'font/otf',
-            '.eot': 'application/vnd.ms-fontobject',
-            '.svg': 'image/svg+xml'
-        }
-        
-        content_type = 'font/woff2'  # default
-        for ext, ct in content_types.items():
-            if font_url.lower().endswith(ext):
-                content_type = ct
-                break
-        
-        # Return the font file with proper headers
-        from flask import Response
-        return Response(
-            response.content,
-            mimetype=content_type,
-            headers={
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET',
-                'Cache-Control': 'public, max-age=31536000',  # Cache for 1 year
-                'Content-Length': str(len(response.content))
-            }
-        )
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Font proxy error: {str(e)}")
-        return jsonify({
-            'status': 'error',
-            'message': f'Failed to fetch font: {str(e)}'
-        }), 502
-    except Exception as e:
-        logger.error(f"Font proxy error: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': 'Internal server error'

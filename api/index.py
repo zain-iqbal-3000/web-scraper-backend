@@ -8,8 +8,6 @@ import logging
 import os
 import json
 from datetime import datetime
-import base64
-import mimetypes
 
 app = Flask(__name__)
 CORS(app)
@@ -519,10 +517,6 @@ class WebScraper:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
         
-        # Track font information instead of downloading
-        self.detected_fonts = []
-        self.css_with_fonts = []
-        
         # Common selectors for cookie popups and unwanted elements to exclude
         self.excluded_selectors = [
             # Cookie popup selectors
@@ -690,14 +684,10 @@ class WebScraper:
     
     def scrape_complete_website(self, url):
         """
-        Scrape complete HTML and CSS including external stylesheets and detect fonts
-        Returns a complete HTML file and font information for frontend loading
+        Scrape complete HTML and CSS including external stylesheets
+        Returns a complete HTML file that can be saved and run locally
         """
         try:
-            # Reset font detection
-            self.detected_fonts = []
-            self.css_with_fonts = []
-            
             # Validate URL
             parsed_url = urlparse(url)
             if not parsed_url.scheme or not parsed_url.netloc:
@@ -712,7 +702,7 @@ class WebScraper:
             # Parse HTML
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Download and embed external CSS files (includes font detection)
+            # Download and embed external CSS files
             css_content = self._download_external_css(soup, base_url, url)
             
             # Process and embed inline styles
@@ -728,10 +718,6 @@ class WebScraper:
                 'url': url,
                 'complete_html': complete_html,
                 'css_files_processed': len(css_content),
-                'fonts_detected': len(self.detected_fonts),
-                'font_urls': [font['url'] for font in self.detected_fonts],
-                'font_info': self.detected_fonts,
-                'css_with_fonts': self.css_with_fonts,
                 'success': True
             }
             
@@ -748,7 +734,6 @@ class WebScraper:
         
         # Find all link tags with CSS stylesheets
         css_links = soup.find_all('link', rel='stylesheet')
-        logger.info(f"Found {len(css_links)} CSS links to process")
         
         for link in css_links:
             href = link.get('href')
@@ -767,153 +752,43 @@ class WebScraper:
                     # Relative path
                     css_url = urljoin(page_url, href)
                 
-                logger.info(f"Processing CSS file: {css_url}")
-                
-                # For Google Fonts and other font services, we need to send proper headers
-                headers = {}
-                if 'fonts.googleapis.com' in css_url or 'fonts.gstatic.com' in css_url:
-                    # Google Fonts requires specific User-Agent to get the correct font formats
-                    headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                
                 # Download CSS file
-                css_response = self.session.get(css_url, timeout=10, headers=headers)
+                css_response = self.session.get(css_url, timeout=10)
                 css_response.raise_for_status()
                 
-                logger.info(f"Downloaded CSS successfully. Size: {len(css_response.text)} characters")
-                
-                # Process CSS content to handle relative URLs within CSS and download fonts
+                # Process CSS content to handle relative URLs within CSS
                 css_content = self._process_css_urls(css_response.text, css_url, base_url)
                 css_contents.append(css_content)
                 
-                logger.info(f"CSS processing completed for: {css_url}")
+                logger.info(f"Downloaded CSS: {css_url}")
                 
             except Exception as e:
                 logger.warning(f"Failed to download CSS {href}: {str(e)}")
                 continue
         
-        logger.info(f"Total CSS files processed: {len(css_contents)}")
         return css_contents
     
-    def _extract_font_info(self, font_url):
-        """Extract font information without downloading"""
-        try:
-            # Determine font type from URL
-            font_type = 'unknown'
-            if font_url.lower().endswith('.woff2'):
-                font_type = 'woff2'
-            elif font_url.lower().endswith('.woff'):
-                font_type = 'woff'
-            elif font_url.lower().endswith('.ttf'):
-                font_type = 'ttf'
-            elif font_url.lower().endswith('.otf'):
-                font_type = 'otf'
-            elif font_url.lower().endswith('.eot'):
-                font_type = 'eot'
-            elif font_url.lower().endswith('.svg'):
-                font_type = 'svg'
-            
-            # Extract font name from URL
-            font_name = font_url.split('/')[-1].split('?')[0]  # Remove query parameters
-            
-            font_info = {
-                'url': font_url,
-                'name': font_name,
-                'type': font_type,
-                'original_url': font_url
-            }
-            
-            # Check if we already have this font
-            if not any(f['url'] == font_url for f in self.detected_fonts):
-                self.detected_fonts.append(font_info)
-                logger.info(f"Detected font: {font_name} ({font_type}) from {font_url}")
-            
-            return font_info
-            
-        except Exception as e:
-            logger.error(f"Failed to extract font info from {font_url}: {str(e)}")
-            return None
-
     def _process_css_urls(self, css_content, css_url, base_url):
-        """Process CSS content to detect fonts and convert relative URLs to absolute URLs"""
+        """Process CSS content to convert relative URLs to absolute URLs"""
         try:
-            logger.info(f"Processing CSS from: {css_url}")
-            logger.info(f"CSS content length: {len(css_content)} characters")
-            
-            # Store original CSS with font info
-            css_with_font_info = {
-                'url': css_url,
-                'original_css': css_content,
-                'fonts_found': []
-            }
-            
-            # Handle @import statements first
-            def replace_import(match):
-                import_url = match.group(1).strip('\'"')
-                
-                if import_url.startswith('data:') or import_url.startswith('http'):
-                    return match.group(0)
-                
-                if import_url.startswith('//'):
-                    absolute_url = f'https:{import_url}'
-                elif import_url.startswith('/'):
-                    absolute_url = f'{base_url}{import_url}'
-                else:
-                    absolute_url = urljoin(css_url, import_url)
-                
-                return f'@import "{absolute_url}"'
-            
-            # Process @import statements
-            processed_css = re.sub(r'@import\s+["\']([^"\']+)["\']', replace_import, css_content)
-            
             # Handle url() references in CSS
             def replace_url(match):
                 url_content = match.group(1).strip('\'"')
-                logger.info(f"Found URL in CSS: {url_content}")
                 
-                # Skip data URLs
-                if url_content.startswith('data:'):
+                if url_content.startswith('data:') or url_content.startswith('http'):
                     return match.group(0)
                 
-                # Convert to absolute URL if needed
-                if url_content.startswith('http'):
-                    absolute_url = url_content
-                elif url_content.startswith('//'):
-                    absolute_url = f'https:{url_content}'
+                if url_content.startswith('//'):
+                    return f'url("https:{url_content}")'
                 elif url_content.startswith('/'):
-                    absolute_url = f'{base_url}{url_content}'
+                    return f'url("{base_url}{url_content}")'
                 else:
                     # Relative URL
                     absolute_url = urljoin(css_url, url_content)
-                
-                # Check if this is a font file (expanded list of extensions)
-                font_extensions = ['.woff2', '.woff', '.ttf', '.otf', '.eot', '.svg']
-                is_font = any(absolute_url.lower().endswith(ext) for ext in font_extensions)
-                
-                # Also check if URL contains font-related keywords
-                if not is_font:
-                    font_keywords = ['font', 'webfont', 'typeface']
-                    is_font = any(keyword in absolute_url.lower() for keyword in font_keywords)
-                
-                if is_font:
-                    logger.info(f"Detected font URL: {absolute_url}")
-                    # Extract font info instead of downloading
-                    font_info = self._extract_font_info(absolute_url)
-                    if font_info:
-                        css_with_font_info['fonts_found'].append(font_info)
-                        logger.info(f"Added font info for frontend loading")
-                    
-                    # Keep the original URL for now - frontend will handle loading
-                    return f'url("{absolute_url}")'
-                else:
-                    # For non-font URLs, just return the absolute URL
                     return f'url("{absolute_url}")'
             
             # Replace all url() references
-            processed_css = re.sub(r'url\(["\']?([^)]+?)["\']?\)', replace_url, processed_css)
-            
-            # Store CSS with font info
-            if css_with_font_info['fonts_found']:
-                self.css_with_fonts.append(css_with_font_info)
+            processed_css = re.sub(r'url\(["\']?([^)]+?)["\']?\)', replace_url, css_content)
             
             return processed_css
             
@@ -980,50 +855,8 @@ class WebScraper:
         except Exception as e:
             logger.warning(f"Error converting relative URLs: {str(e)}")
     
-    def _generate_font_loading_script(self, fonts):
-        """Generate JavaScript to load fonts on the frontend"""
-        if not fonts:
-            return ""
-        
-        script = """
-<script>
-// Font loading script generated by web scraper
-(function() {
-    const fonts = """ + json.dumps(fonts) + """;
-    
-    function loadFont(fontInfo) {
-        return new Promise((resolve, reject) => {
-            const font = new FontFace(
-                fontInfo.name.replace(/\.[^/.]+$/, ""), // Remove extension
-                `url("${fontInfo.url}")`,
-                {
-                    display: 'swap'
-                }
-            );
-            
-            font.load().then(function(loadedFont) {
-                document.fonts.add(loadedFont);
-                console.log('✅ Loaded font:', fontInfo.name);
-                resolve(loadedFont);
-            }).catch(function(error) {
-                console.warn('❌ Failed to load font:', fontInfo.name, error);
-                reject(error);
-            });
-        });
-    }
-    
-    // Load all fonts
-    Promise.allSettled(fonts.map(loadFont)).then(results => {
-        const loaded = results.filter(r => r.status === 'fulfilled').length;
-        const failed = results.filter(r => r.status === 'rejected').length;
-        console.log(`🎨 Font loading complete: ${loaded} loaded, ${failed} failed`);
-    });
-})();
-</script>"""
-        return script
-
     def _create_complete_html(self, soup, css_contents, original_url):
-        """Create a complete HTML document with embedded CSS and font loading"""
+        """Create a complete HTML document with embedded CSS"""
         try:
             # Remove existing CSS link tags since we're embedding the CSS
             for link in soup.find_all('link', rel='stylesheet'):
@@ -1037,11 +870,6 @@ class WebScraper:
                 style_tag = soup.new_tag('style', type='text/css')
                 style_tag.string = combined_css
                 soup.head.append(style_tag)
-                
-                # Add font loading script if fonts were detected
-                if self.detected_fonts:
-                    font_script = self._generate_font_loading_script(self.detected_fonts)
-                    soup.head.append(BeautifulSoup(font_script, 'html.parser'))
                 
                 # Add meta tag with original URL
                 meta_tag = soup.new_tag('meta')

@@ -800,38 +800,79 @@ class WebScraper:
             return css_content
     
     def _fix_cors_fonts(self, css_content):
-        """Fix CORS font issues by replacing external font URLs with system fonts"""
+        """Fix CORS font issues by aggressively removing external font URLs"""
         try:
-            # Remove or modify @font-face rules that cause CORS issues
+            # Step 1: Remove ALL @font-face rules that reference external domains
             font_face_pattern = r'@font-face\s*\{[^}]*\}'
+            css_content = re.sub(font_face_pattern, '', css_content, flags=re.IGNORECASE | re.DOTALL)
             
-            def replace_font_face(match):
-                font_face_rule = match.group(0)
-                # If it contains external URLs that cause CORS issues, comment it out
-                if 'wp-content/themes' in font_face_rule or 'fontawesome' in font_face_rule:
-                    return f'/* CORS blocked font: {font_face_rule} */'
-                return font_face_rule
+            # Step 2: Remove all url() references to external font files
+            font_url_patterns = [
+                r'url\(["\']?[^)]*?\.woff2?["\']?\)',
+                r'url\(["\']?[^)]*?\.ttf["\']?\)',
+                r'url\(["\']?[^)]*?\.otf["\']?\)',
+                r'url\(["\']?[^)]*?\.eot["\']?\)',
+                r'url\(["\']?[^)]*?\.svg[^)]*?["\']?\)'
+            ]
             
-            # Replace problematic @font-face rules
-            processed_css = re.sub(font_face_pattern, replace_font_face, css_content, flags=re.IGNORECASE | re.DOTALL)
+            for pattern in font_url_patterns:
+                css_content = re.sub(pattern, 'none', css_content, flags=re.IGNORECASE)
             
-            # Add fallback font declarations
-            fallback_fonts = '''
+            # Step 3: Remove any remaining references to the problematic domain
+            problematic_domains = [
+                'maprimerenovsolaire.fr',
+                'wp-content/themes',
+                'fontawesome',
+                'wp-admin'
+            ]
             
-            /* CORS-safe system font fallbacks */
-            body, html, * {
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif !important;
-            }
+            for domain in problematic_domains:
+                # Remove any lines that contain these domains
+                lines = css_content.split('\n')
+                cleaned_lines = []
+                for line in lines:
+                    if domain not in line.lower():
+                        cleaned_lines.append(line)
+                    else:
+                        cleaned_lines.append(f'/* CORS blocked: {line.strip()} */')
+                css_content = '\n'.join(cleaned_lines)
             
-            .fa, .fas, .far, .fab, .fal, .fontawesome {
-                font-family: "Font Awesome 5 Free", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
-                font-weight: 900 !important;
-            }
-            '''
+            # Step 4: Add comprehensive font fallbacks
+            font_fallbacks = '''
+
+/* COMPREHENSIVE FONT FALLBACKS - NO EXTERNAL FONTS */
+* {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
+}
+
+body, html, div, span, p, h1, h2, h3, h4, h5, h6 {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
+}
+
+/* FontAwesome fallbacks */
+.fa, .fas, .far, .fab, .fal, .fad, .fass, .fasr, .fasl, .fontawesome {
+    font-family: "Font Awesome 6 Free", "Font Awesome 5 Free", "FontAwesome", monospace !important;
+    font-weight: 900 !important;
+}
+
+/* Remove any font imports */
+@import url(); /* Block imports */
+
+/* Override any remaining font-face declarations */
+@font-face {
+    font-family: fallback;
+    src: local("Arial");
+}
+
+'''
             
-            processed_css += fallback_fonts
+            css_content += font_fallbacks
             
-            return processed_css
+            # Step 5: Remove @import statements that might load external fonts
+            css_content = re.sub(r'@import\s+url\([^)]*\);?', '', css_content, flags=re.IGNORECASE)
+            css_content = re.sub(r'@import\s+["\'][^"\']*["\'];?', '', css_content, flags=re.IGNORECASE)
+            
+            return css_content
             
         except Exception as e:
             logger.warning(f"Error fixing CORS fonts: {str(e)}")
@@ -941,42 +982,94 @@ class WebScraper:
                 # Add script to handle CORS font loading issues
                 cors_script = soup.new_tag('script')
                 cors_script.string = '''
-                // Handle CORS font loading errors gracefully
+                // AGGRESSIVE CORS BLOCKING - NO EXTERNAL FONT REQUESTS
                 (function() {
-                    // Catch and suppress font loading errors
+                    // Override fetch to block external font requests
+                    const originalFetch = window.fetch;
+                    window.fetch = function(url, options) {
+                        if (typeof url === 'string') {
+                            if (url.includes('maprimerenovsolaire.fr') || 
+                                url.includes('.woff') || 
+                                url.includes('.ttf') || 
+                                url.includes('.otf') || 
+                                url.includes('.eot') ||
+                                url.includes('wp-content') ||
+                                url.includes('wp-admin')) {
+                                console.log('Blocked external request:', url);
+                                return Promise.reject(new Error('Blocked by CORS protection'));
+                            }
+                        }
+                        return originalFetch.apply(this, arguments);
+                    };
+                    
+                    // Override XMLHttpRequest
+                    const originalXHR = window.XMLHttpRequest;
+                    window.XMLHttpRequest = function() {
+                        const xhr = new originalXHR();
+                        const originalOpen = xhr.open;
+                        xhr.open = function(method, url) {
+                            if (typeof url === 'string' && (
+                                url.includes('maprimerenovsolaire.fr') || 
+                                url.includes('.woff') || 
+                                url.includes('.ttf') || 
+                                url.includes('.otf') ||
+                                url.includes('wp-content') ||
+                                url.includes('wp-admin'))) {
+                                console.log('Blocked XHR request:', url);
+                                return;
+                            }
+                            return originalOpen.apply(this, arguments);
+                        };
+                        return xhr;
+                    };
+                    
+                    // Block all external font loading attempts
                     window.addEventListener('error', function(e) {
-                        if (e.target && (e.target.tagName === 'LINK' || e.target.src)) {
+                        if (e.target) {
                             var src = e.target.href || e.target.src || '';
-                            if (src.includes('.woff') || src.includes('.ttf') || src.includes('.otf') || src.includes('.eot')) {
-                                console.log('Font loading blocked by CORS, using system fonts');
+                            if (src.includes('maprimerenovsolaire.fr') || 
+                                src.includes('.woff') || 
+                                src.includes('.ttf') || 
+                                src.includes('.otf') ||
+                                src.includes('wp-content')) {
                                 e.preventDefault();
+                                e.stopPropagation();
                                 return false;
                             }
                         }
                     }, true);
                     
-                    // Remove @font-face rules that cause CORS issues
+                    // Remove all problematic link tags and stylesheets
                     document.addEventListener('DOMContentLoaded', function() {
+                        // Remove link tags pointing to external fonts
+                        var links = document.querySelectorAll('link[href*="maprimerenovsolaire.fr"], link[href*=".woff"], link[href*=".ttf"], link[href*="wp-content"]');
+                        links.forEach(function(link) {
+                            link.remove();
+                        });
+                        
+                        // Remove script tags pointing to external domain
+                        var scripts = document.querySelectorAll('script[src*="maprimerenovsolaire.fr"], script[src*="wp-content"], script[src*="wp-admin"]');
+                        scripts.forEach(function(script) {
+                            script.remove();
+                        });
+                        
+                        // Clean up stylesheets
                         try {
                             var sheets = document.styleSheets;
-                            for (var i = 0; i < sheets.length; i++) {
+                            for (var i = sheets.length - 1; i >= 0; i--) {
                                 try {
-                                    var rules = sheets[i].cssRules || sheets[i].rules;
-                                    for (var j = rules.length - 1; j >= 0; j--) {
-                                        if (rules[j].type === CSSRule.FONT_FACE_RULE) {
-                                            var src = rules[j].style.src;
-                                            if (src && (src.includes('maprimerenovsolaire.fr') || src.includes('wp-content/themes'))) {
-                                                sheets[i].deleteRule(j);
-                                            }
+                                    var sheet = sheets[i];
+                                    if (sheet.href && (sheet.href.includes('maprimerenovsolaire.fr') || sheet.href.includes('wp-content'))) {
+                                        sheet.disabled = true;
+                                        if (sheet.ownerNode) {
+                                            sheet.ownerNode.remove();
                                         }
                                     }
-                                } catch (e) {
-                                    // CORS blocked, skip this stylesheet
-                                }
+                                } catch (e) {}
                             }
-                        } catch (e) {
-                            console.log('Font cleanup completed');
-                        }
+                        } catch (e) {}
+                        
+                        console.log('External resource cleanup completed');
                     });
                 })();
                 '''

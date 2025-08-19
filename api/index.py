@@ -24,14 +24,12 @@ CORS(app,
 @app.after_request
 def after_request(response):
     """Add headers to prevent CORS issues with fonts and external resources"""
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,Accept,Origin,X-Requested-With')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    # Don't duplicate CORS headers that Flask-CORS already sets
+    # Only add specific headers for font loading and CSP
     
-    # Add specific headers for font loading
-    response.headers.add('Access-Control-Allow-Headers', 'Range')
-    response.headers.add('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Encoding, Content-Length, Content-Range')
+    # Add specific headers for font loading (use set to avoid duplicates)
+    response.headers.set('Access-Control-Allow-Headers', 'Content-Type,Authorization,Accept,Origin,X-Requested-With,Range')
+    response.headers.set('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Encoding, Content-Length, Content-Range')
     
     # Add Content Security Policy headers to allow font loading
     csp_directives = [
@@ -42,7 +40,7 @@ def after_request(response):
         "script-src 'self' 'unsafe-inline' 'unsafe-eval' *",
         "connect-src 'self' *"
     ]
-    response.headers.add('Content-Security-Policy', '; '.join(csp_directives))
+    response.headers.set('Content-Security-Policy', '; '.join(csp_directives))
     
     return response
 
@@ -1709,10 +1707,6 @@ def scrape_complete_endpoint():
             status=200,
             mimetype='application/json',
             headers={
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-                'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range, Accept-Ranges',
-                'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges',
                 'Content-Security-Policy': "font-src 'self' data: *; style-src 'self' 'unsafe-inline' *; img-src 'self' data: *; default-src 'self' 'unsafe-inline' 'unsafe-eval' *;",
                 'Referrer-Policy': 'no-referrer',
                 'Cross-Origin-Resource-Policy': 'cross-origin',

@@ -796,7 +796,7 @@ class WebScraper:
                 css_response.raise_for_status()
                 
                 # Process CSS content to handle relative URLs within CSS
-                css_content = self._process_css_urls(css_response.text, css_url, base_url)
+                css_content = self._process_css_urls(css_response.text, css_url, base_url, use_font_proxy=False)
                 css_contents.append(css_content)
                 
                 logger.info(f"Downloaded CSS: {css_url}")
@@ -934,6 +934,45 @@ class WebScraper:
                 viewport_meta.attrs['name'] = 'viewport'
                 viewport_meta.attrs['content'] = 'width=device-width, initial-scale=1.0'
                 soup.head.append(viewport_meta)
+                
+                # Add CORS bypass meta tags
+                cors_meta = soup.new_tag('meta')
+                cors_meta.attrs['http-equiv'] = 'Content-Security-Policy'
+                cors_meta.attrs['content'] = "font-src 'self' data: *; style-src 'self' 'unsafe-inline' *; img-src 'self' data: *;"
+                soup.head.append(cors_meta)
+                
+                # Add referrer policy to help with CORS
+                referrer_meta = soup.new_tag('meta')
+                referrer_meta.attrs['name'] = 'referrer'
+                referrer_meta.attrs['content'] = 'no-referrer'
+                soup.head.append(referrer_meta)
+                
+                # Add CORS bypass script
+                cors_script = soup.new_tag('script')
+                cors_script.string = '''
+                // CORS bypass for fonts and external resources
+                (function() {
+                    // Override fetch to add CORS headers
+                    const originalFetch = window.fetch;
+                    window.fetch = function(...args) {
+                        if (args[1]) {
+                            args[1].mode = 'no-cors';
+                        } else {
+                            args[1] = { mode: 'no-cors' };
+                        }
+                        return originalFetch.apply(this, args);
+                    };
+                    
+                    // Add CORS headers to document
+                    document.addEventListener('DOMContentLoaded', function() {
+                        const meta = document.createElement('meta');
+                        meta.setAttribute('name', 'Access-Control-Allow-Origin');
+                        meta.setAttribute('content', '*');
+                        document.head.appendChild(meta);
+                    });
+                })();
+                '''
+                soup.head.append(cors_script)
             
             # Ensure proper doctype
             doctype = '<!DOCTYPE html>\n'
@@ -1650,19 +1689,37 @@ def scrape_complete_endpoint():
             result = scraper.scrape_complete_website(url)
             results.append(result)
         
-        return jsonify({
+        from flask import Response
+        response_data = {
             'status': 'success',
             'data': results,
             'scraping_type': 'complete_html_css',
             'processing_info': {
                 'total_urls': len(urls),
-                'includes': ['html', 'css', 'external_stylesheets', 'absolute_urls', 'auto_font_proxy'],
-                'cors_solution': 'Font URLs automatically converted to proxy URLs to prevent CORS errors',
-                'font_proxy_automatic': True,
+                'includes': ['html', 'css', 'external_stylesheets', 'absolute_urls', 'cors_headers'],
+                'cors_solution': 'Enhanced CORS headers and CSP policies to allow external resource loading',
+                'cors_bypass_included': True,
                 'supported_fonts': ['.woff2', '.woff', '.ttf', '.otf', '.eot'],
-                'note': 'HTML files include automatic font proxying. No manual setup needed for CORS.'
+                'note': 'HTML includes CORS bypass headers and meta tags for external resources.'
             }
-        })
+        }
+        
+        response = Response(
+            response=json.dumps(response_data),
+            status=200,
+            mimetype='application/json',
+            headers={
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range, Accept-Ranges',
+                'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges',
+                'Content-Security-Policy': "font-src 'self' data: *; style-src 'self' 'unsafe-inline' *; img-src 'self' data: *; default-src 'self' 'unsafe-inline' 'unsafe-eval' *;",
+                'Referrer-Policy': 'no-referrer',
+                'Cross-Origin-Resource-Policy': 'cross-origin',
+                'Cross-Origin-Embedder-Policy': 'unsafe-none'
+            }
+        )
+        return response
     
     except Exception as e:
         logger.error(f"Complete scraping API error: {str(e)}")

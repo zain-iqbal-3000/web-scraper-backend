@@ -8,6 +8,8 @@ import logging
 import os
 import json
 from datetime import datetime
+import base64
+import mimetypes
 
 app = Flask(__name__)
 CORS(app)
@@ -517,6 +519,10 @@ class WebScraper:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
         
+        # Track font downloads
+        self.fonts_downloaded = 0
+        self.fonts_failed = 0
+        
         # Common selectors for cookie popups and unwanted elements to exclude
         self.excluded_selectors = [
             # Cookie popup selectors
@@ -684,10 +690,14 @@ class WebScraper:
     
     def scrape_complete_website(self, url):
         """
-        Scrape complete HTML and CSS including external stylesheets
+        Scrape complete HTML and CSS including external stylesheets and fonts
         Returns a complete HTML file that can be saved and run locally
         """
         try:
+            # Reset font statistics
+            self.fonts_downloaded = 0
+            self.fonts_failed = 0
+            
             # Validate URL
             parsed_url = urlparse(url)
             if not parsed_url.scheme or not parsed_url.netloc:
@@ -702,7 +712,7 @@ class WebScraper:
             # Parse HTML
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Download and embed external CSS files
+            # Download and embed external CSS files (includes font processing)
             css_content = self._download_external_css(soup, base_url, url)
             
             # Process and embed inline styles
@@ -718,6 +728,8 @@ class WebScraper:
                 'url': url,
                 'complete_html': complete_html,
                 'css_files_processed': len(css_content),
+                'fonts_downloaded': self.fonts_downloaded,
+                'fonts_failed': self.fonts_failed,
                 'success': True
             }
             
@@ -752,11 +764,17 @@ class WebScraper:
                     # Relative path
                     css_url = urljoin(page_url, href)
                 
+                # For Google Fonts and other font services, we need to send proper headers
+                headers = {}
+                if 'fonts.googleapis.com' in css_url or 'fonts.gstatic.com' in css_url:
+                    # Google Fonts requires specific User-Agent to get the correct font formats
+                    headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                
                 # Download CSS file
-                css_response = self.session.get(css_url, timeout=10)
+                css_response = self.session.get(css_url, timeout=10, headers=headers)
                 css_response.raise_for_status()
                 
-                # Process CSS content to handle relative URLs within CSS
+                # Process CSS content to handle relative URLs within CSS and download fonts
                 css_content = self._process_css_urls(css_response.text, css_url, base_url)
                 css_contents.append(css_content)
                 
@@ -768,27 +786,121 @@ class WebScraper:
         
         return css_contents
     
-    def _process_css_urls(self, css_content, css_url, base_url):
-        """Process CSS content to convert relative URLs to absolute URLs"""
+    def _download_font_as_base64(self, font_url):
+        """Download a font file and convert it to base64 data URL"""
         try:
+            # Set proper headers for font downloading
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'font/woff2,font/woff,font/ttf,application/font-woff2,application/font-woff,application/font-ttf,*/*'
+            }
+            
+            # Add referrer for Google Fonts
+            if 'fonts.gstatic.com' in font_url:
+                headers['Referer'] = 'https://fonts.googleapis.com/'
+            
+            # Download the font file
+            font_response = self.session.get(font_url, timeout=15, headers=headers)
+            font_response.raise_for_status()
+            
+            # Get the content type or determine it from the URL
+            content_type = font_response.headers.get('content-type')
+            if not content_type:
+                # Determine font type from URL extension
+                if font_url.lower().endswith('.woff2'):
+                    content_type = 'font/woff2'
+                elif font_url.lower().endswith('.woff'):
+                    content_type = 'font/woff'
+                elif font_url.lower().endswith('.ttf'):
+                    content_type = 'font/ttf'
+                elif font_url.lower().endswith('.otf'):
+                    content_type = 'font/otf'
+                elif font_url.lower().endswith('.eot'):
+                    content_type = 'application/vnd.ms-fontobject'
+                else:
+                    content_type = 'font/woff2'  # Default fallback
+            
+            # Convert to base64
+            font_base64 = base64.b64encode(font_response.content).decode('utf-8')
+            
+            # Create data URL
+            data_url = f"data:{content_type};base64,{font_base64}"
+            
+            # Track successful download
+            self.fonts_downloaded += 1
+            logger.info(f"Downloaded and converted font: {font_url}")
+            return data_url
+            
+        except Exception as e:
+            # Track failed download
+            self.fonts_failed += 1
+            logger.warning(f"Failed to download font {font_url}: {str(e)}")
+            return None
+
+    def _process_css_urls(self, css_content, css_url, base_url):
+        """Process CSS content to convert relative URLs to absolute URLs and download fonts"""
+        try:
+            # Handle @import statements first
+            def replace_import(match):
+                import_url = match.group(1).strip('\'"')
+                
+                if import_url.startswith('data:') or import_url.startswith('http'):
+                    return match.group(0)
+                
+                if import_url.startswith('//'):
+                    absolute_url = f'https:{import_url}'
+                elif import_url.startswith('/'):
+                    absolute_url = f'{base_url}{import_url}'
+                else:
+                    absolute_url = urljoin(css_url, import_url)
+                
+                return f'@import "{absolute_url}"'
+            
+            # Process @import statements
+            processed_css = re.sub(r'@import\s+["\']([^"\']+)["\']', replace_import, css_content)
+            
             # Handle url() references in CSS
             def replace_url(match):
                 url_content = match.group(1).strip('\'"')
                 
-                if url_content.startswith('data:') or url_content.startswith('http'):
+                # Skip data URLs
+                if url_content.startswith('data:'):
                     return match.group(0)
                 
-                if url_content.startswith('//'):
-                    return f'url("https:{url_content}")'
+                # Convert to absolute URL if needed
+                if url_content.startswith('http'):
+                    absolute_url = url_content
+                elif url_content.startswith('//'):
+                    absolute_url = f'https:{url_content}'
                 elif url_content.startswith('/'):
-                    return f'url("{base_url}{url_content}")'
+                    absolute_url = f'{base_url}{url_content}'
                 else:
                     # Relative URL
                     absolute_url = urljoin(css_url, url_content)
+                
+                # Check if this is a font file (expanded list of extensions)
+                font_extensions = ['.woff2', '.woff', '.ttf', '.otf', '.eot', '.svg']
+                is_font = any(absolute_url.lower().endswith(ext) for ext in font_extensions)
+                
+                # Also check if URL contains font-related keywords
+                if not is_font:
+                    font_keywords = ['font', 'webfont', 'typeface']
+                    is_font = any(keyword in absolute_url.lower() for keyword in font_keywords)
+                
+                if is_font:
+                    # Download and convert font to base64
+                    data_url = self._download_font_as_base64(absolute_url)
+                    if data_url:
+                        return f'url("{data_url}")'
+                    else:
+                        # If font download fails, fallback to original URL
+                        return f'url("{absolute_url}")'
+                else:
+                    # For non-font URLs, just return the absolute URL
                     return f'url("{absolute_url}")'
             
             # Replace all url() references
-            processed_css = re.sub(r'url\(["\']?([^)]+?)["\']?\)', replace_url, css_content)
+            processed_css = re.sub(r'url\(["\']?([^)]+?)["\']?\)', replace_url, processed_css)
             
             return processed_css
             

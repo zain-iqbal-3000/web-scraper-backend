@@ -746,6 +746,7 @@ class WebScraper:
         
         # Find all link tags with CSS stylesheets
         css_links = soup.find_all('link', rel='stylesheet')
+        logger.info(f"Found {len(css_links)} CSS links to process")
         
         for link in css_links:
             href = link.get('href')
@@ -764,6 +765,8 @@ class WebScraper:
                     # Relative path
                     css_url = urljoin(page_url, href)
                 
+                logger.info(f"Processing CSS file: {css_url}")
+                
                 # For Google Fonts and other font services, we need to send proper headers
                 headers = {}
                 if 'fonts.googleapis.com' in css_url or 'fonts.gstatic.com' in css_url:
@@ -774,21 +777,26 @@ class WebScraper:
                 css_response = self.session.get(css_url, timeout=10, headers=headers)
                 css_response.raise_for_status()
                 
+                logger.info(f"Downloaded CSS successfully. Size: {len(css_response.text)} characters")
+                
                 # Process CSS content to handle relative URLs within CSS and download fonts
                 css_content = self._process_css_urls(css_response.text, css_url, base_url)
                 css_contents.append(css_content)
                 
-                logger.info(f"Downloaded CSS: {css_url}")
+                logger.info(f"CSS processing completed for: {css_url}")
                 
             except Exception as e:
                 logger.warning(f"Failed to download CSS {href}: {str(e)}")
                 continue
         
+        logger.info(f"Total CSS files processed: {len(css_contents)}")
         return css_contents
     
     def _download_font_as_base64(self, font_url):
         """Download a font file and convert it to base64 data URL"""
         try:
+            logger.info(f"Attempting to download font: {font_url}")
+            
             # Set proper headers for font downloading
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -802,6 +810,8 @@ class WebScraper:
             # Download the font file
             font_response = self.session.get(font_url, timeout=15, headers=headers)
             font_response.raise_for_status()
+            
+            logger.info(f"Font downloaded successfully. Size: {len(font_response.content)} bytes")
             
             # Get the content type or determine it from the URL
             content_type = font_response.headers.get('content-type')
@@ -828,18 +838,21 @@ class WebScraper:
             
             # Track successful download
             self.fonts_downloaded += 1
-            logger.info(f"Downloaded and converted font: {font_url}")
+            logger.info(f"Font converted to base64. Data URL length: {len(data_url)} characters")
             return data_url
             
         except Exception as e:
             # Track failed download
             self.fonts_failed += 1
-            logger.warning(f"Failed to download font {font_url}: {str(e)}")
+            logger.error(f"Failed to download font {font_url}: {str(e)}")
             return None
 
     def _process_css_urls(self, css_content, css_url, base_url):
         """Process CSS content to convert relative URLs to absolute URLs and download fonts"""
         try:
+            logger.info(f"Processing CSS from: {css_url}")
+            logger.info(f"CSS content length: {len(css_content)} characters")
+            
             # Handle @import statements first
             def replace_import(match):
                 import_url = match.group(1).strip('\'"')
@@ -862,6 +875,7 @@ class WebScraper:
             # Handle url() references in CSS
             def replace_url(match):
                 url_content = match.group(1).strip('\'"')
+                logger.info(f"Found URL in CSS: {url_content}")
                 
                 # Skip data URLs
                 if url_content.startswith('data:'):
@@ -888,12 +902,15 @@ class WebScraper:
                     is_font = any(keyword in absolute_url.lower() for keyword in font_keywords)
                 
                 if is_font:
+                    logger.info(f"Detected font URL: {absolute_url}")
                     # Download and convert font to base64
                     data_url = self._download_font_as_base64(absolute_url)
                     if data_url:
+                        logger.info(f"Successfully converted font to data URL")
                         return f'url("{data_url}")'
                     else:
                         # If font download fails, fallback to original URL
+                        logger.warning(f"Failed to convert font, using original URL")
                         return f'url("{absolute_url}")'
                 else:
                     # For non-font URLs, just return the absolute URL

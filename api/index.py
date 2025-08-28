@@ -12,6 +12,26 @@ from datetime import datetime
 app = Flask(__name__)
 CORS(app)
 
+# Proxy endpoint for external resources
+from flask import Response
+
+@app.route('/proxy')
+def proxy():
+    url = request.args.get('url')
+    if not url:
+        return jsonify({'error': 'Missing url parameter'}), 400
+    try:
+        # Stream the request to handle large files
+        resp = requests.get(url, stream=True, timeout=10)
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        headers = [(name, value) for (name, value) in resp.raw.headers.items() if name.lower() not in excluded_headers]
+        # Add CORS header
+        headers.append(('Access-Control-Allow-Origin', '*'))
+        return Response(resp.content, resp.status_code, headers)
+    except Exception as e:
+        logger.error(f"Proxy error: {str(e)}")
+        return jsonify({'error': 'Proxy failed', 'details': str(e)}), 500
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

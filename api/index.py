@@ -1,3 +1,83 @@
+from flask import Flask, request, jsonify, send_file, make_response, Response
+from flask_cors import CORS
+import requests
+from bs4 import BeautifulSoup
+import re
+from urllib.parse import urljoin, urlparse
+import logging
+import os
+import json
+from datetime import datetime
+
+app = Flask(__name__)
+CORS(app)
+
+# Backend mirror endpoint (GET and POST)
+@app.route('/mirror', methods=['GET', 'POST'])
+def mirror():
+    url = request.args.get('url')
+    if not url:
+        return jsonify({'error': 'Missing url parameter'}), 400
+    try:
+        # Support GET and POST mirroring
+        if request.method == 'POST':
+            resp = requests.post(url, data=request.form, headers={k: v for k, v in request.headers if k != 'Host'}, timeout=15)
+        else:
+            resp = requests.get(url, timeout=15)
+        if resp.status_code != 200:
+            return jsonify({'error': f'Failed to fetch URL: {resp.status_code}'}), 400
+        html = resp.text
+        parsed = urlparse(url)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+
+        # Remove CSP meta tags
+        html = re.sub(r"<meta[^>]+http-equiv=[\"']Content-Security-Policy[\"'][^>]*>", '', html, flags=re.IGNORECASE)
+
+        # Add or update <base> tag to ensure relative URLs work
+        if '<head' in html:
+            if '<base ' not in html:
+                html = re.sub(r'(<head[^>]*>)', r'\1<base href="/mirror-resource?url=' + base_url + '/">', html, count=1, flags=re.IGNORECASE)
+
+        # Rewrite all resource URLs to go through /mirror-resource
+        def rewrite_url(match):
+            orig_url = match.group(1)
+            if orig_url.startswith('data:') or orig_url.startswith('blob:'):
+                return match.group(0)
+            abs_url = urljoin(base_url + '/', orig_url)
+            proxied = f"/mirror-resource?url={abs_url}"
+            return match.group(0).replace(orig_url, proxied)
+
+        # Replace src, href, and action in HTML
+        html = re.sub(r'src=["\']([^"\']+)["\']', rewrite_url, html)
+        html = re.sub(r'href=["\']([^"\']+)["\']', rewrite_url, html)
+        html = re.sub(r'action=["\']([^"\']+)["\']', rewrite_url, html)
+
+        # Inline <style> and <script> tags can reference URLs, rewrite those too
+        html = re.sub(r'url\(["\']?([^\)"\']+)["\']?\)', lambda m: f'url(/mirror-resource?url={urljoin(base_url + "/", m.group(1))})', html)
+
+        response = make_response(html)
+        response.headers['Content-Type'] = 'text/html'
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Mirror error: {str(e)}")
+        return jsonify({'error': 'Mirror failed', 'details': str(e)}), 500
+
+# Serve mirrored resources
+@app.route('/mirror-resource')
+def mirror_resource():
+    url = request.args.get('url')
+    if not url:
+        return jsonify({'error': 'Missing url parameter'}), 400
+    try:
+        resp = requests.get(url, stream=True, timeout=15)
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        headers = [(name, value) for (name, value) in resp.raw.headers.items() if name.lower() not in excluded_headers]
+        headers.append(('Access-Control-Allow-Origin', '*'))
+        return Response(resp.content, resp.status_code, headers)
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Mirror resource error: {str(e)}")
+        return jsonify({'error': 'Mirror resource failed', 'details': str(e)}), 500
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
@@ -11,6 +91,26 @@ from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)
+
+# Proxy endpoint for external resources
+from flask import Response
+
+@app.route('/proxy')
+def proxy():
+    url = request.args.get('url')
+    if not url:
+        return jsonify({'error': 'Missing url parameter'}), 400
+    try:
+        # Stream the request to handle large files
+        resp = requests.get(url, stream=True, timeout=10)
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        headers = [(name, value) for (name, value) in resp.raw.headers.items() if name.lower() not in excluded_headers]
+        # Add CORS header
+        headers.append(('Access-Control-Allow-Origin', '*'))
+        return Response(resp.content, resp.status_code, headers)
+    except Exception as e:
+        logger.error(f"Proxy error: {str(e)}")
+        return jsonify({'error': 'Proxy failed', 'details': str(e)}), 500
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

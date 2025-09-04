@@ -1,0 +1,33 @@
+{
+  "name": "wordpress-ab-testing-integration",
+  "version": "1.0.0",
+  "description": "WordPress A/B testing integration for LP Optimization web app",
+  "main": "wordpress_integration.js",
+  "scripts": {
+    "start": "node wordpress_integration.js",
+    "demo": "node wordpress_demo.js",
+    "test": "node test_wordpress.js"
+  },
+  "keywords": [
+    "wordpress",
+    "ab-testing",
+    "optimization",
+    "rest-api",
+    "landing-pages"
+  ],
+  "author": "LP Optimization Team",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-repo/wordpress-integration"
+  }
+}

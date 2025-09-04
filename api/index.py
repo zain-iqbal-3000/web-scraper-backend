@@ -1328,7 +1328,10 @@ def health_check():
             'change_password': '/auth/change-password',
             'forgot_password': '/auth/forgot-password',
             'scrape': '/scrape',
-            'scrape_complete': '/scrape-complete'
+            'scrape_complete': '/scrape-complete',
+            'wordpress_ship': '/wordpress/ship' if WORDPRESS_AVAILABLE else None,
+            'wordpress_test': '/wordpress/test-connection' if WORDPRESS_AVAILABLE else None,
+            'wordpress_config': '/wordpress/config' if WORDPRESS_AVAILABLE else None
         },
         'ai_features': {
             'headline_optimization': True,
@@ -1338,7 +1341,8 @@ def health_check():
             'model': 'cerebras-llama3.1-8b',
             'suggestions_per_item': 10,
             'content_types_supported': ['headline', 'subheadline', 'description', 'cta']
-        }
+        },
+        'wordpress_integration': get_wordpress_status()
     })
 
 @app.route('/auth/register', methods=['POST'])
@@ -1691,6 +1695,280 @@ def internal_error(error):
     }), 500
 
 
+
+# WordPress Integration (optional - only loaded when needed)
+try:
+    from wordpress_optional import (
+        WordPressPageDuplicator, 
+        WordPressConfig, 
+        ContentChange, 
+        parse_frontend_changes,
+        WORDPRESS_AVAILABLE,
+        get_wordpress_status,
+        get_wordpress_credentials
+    )
+    logger.info(f"WordPress integration status: {'enabled' if WORDPRESS_AVAILABLE else 'disabled'}")
+except ImportError:
+    WORDPRESS_AVAILABLE = False
+    logger.warning("WordPress integration module not found")
+    
+    def get_wordpress_status():
+        return {
+            'available': False,
+            'status': 'disabled - module not found',
+            'features': []
+        }
+    
+    def get_wordpress_credentials():
+        return {
+            'configured': False,
+            'message': 'WordPress integration not available'
+        }
+
+@app.route('/wordpress/ship', methods=['POST'])
+def ship_to_wordpress():
+    """
+    Ship changes to WordPress - Create duplicate page with modified content
+    Expects JSON: {
+        "wordpress_config": {
+            "site_url": "https://your-site.com",
+            "username": "your-username", 
+            "password": "your-app-password"
+        },
+        "page_url": "https://your-site.com/original-page",
+        "saved_changes": {
+            "element-id-1": {"original": "...", "modified": "..."},
+            "element-id-2": {"original": "...", "modified": "..."}
+        },
+        "test_name": "Optional AB Test Name"
+    }
+    """
+    try:
+        # Check if WordPress integration is available
+        if not WORDPRESS_AVAILABLE:
+            return jsonify({
+                'status': 'error',
+                'message': 'WordPress integration not available. Required dependencies not installed.',
+                'available_features': 'This feature requires additional packages that are not available in the current deployment.'
+            }), 503
+        
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Request body is required'
+            }), 400
+        
+        # Validate required fields
+        wp_config_data = data.get('wordpress_config')
+        page_url = data.get('page_url')
+        saved_changes = data.get('saved_changes')
+        test_name = data.get('test_name')
+        
+        # Use environment variables as fallback for WordPress config
+        env_credentials = get_wordpress_credentials()
+        
+        if not wp_config_data and env_credentials['configured']:
+            wp_config_data = {
+                'site_url': env_credentials['site_url'],
+                'username': env_credentials['username'],
+                'password': env_credentials['password']
+            }
+            logger.info("Using WordPress credentials from environment variables")
+        
+        if not wp_config_data:
+            return jsonify({
+                'status': 'error',
+                'message': 'WordPress configuration is required (either in request body or environment variables)',
+                'note': 'Set WORDPRESS_SITE_URL, WORDPRESS_USERNAME, and WORDPRESS_PASSWORD environment variables'
+            }), 400
+        
+        if not page_url:
+            return jsonify({
+                'status': 'error',
+                'message': 'Page URL is required'
+            }), 400
+        
+        if not saved_changes:
+            return jsonify({
+                'status': 'error',
+                'message': 'Saved changes are required'
+            }), 400
+        
+        # Validate WordPress config
+        required_wp_fields = ['site_url', 'username', 'password']
+        for field in required_wp_fields:
+            if not wp_config_data.get(field):
+                return jsonify({
+                    'status': 'error',
+                    'message': f'WordPress {field} is required'
+                }), 400
+        
+        # Create WordPress configuration
+        wp_config = WordPressConfig(
+            site_url=wp_config_data['site_url'],
+            username=wp_config_data['username'],
+            password=wp_config_data['password']
+        )
+        
+        # Parse frontend changes
+        changes = parse_frontend_changes(saved_changes)
+        
+        if not changes:
+            return jsonify({
+                'status': 'error',
+                'message': 'No valid changes found to ship'
+            }), 400
+        
+        # Initialize WordPress duplicator
+        duplicator = WordPressPageDuplicator(wp_config)
+        
+        # Ship changes to WordPress
+        result = duplicator.ship_changes_to_wordpress(
+            page_url=page_url,
+            changes=changes,
+            test_name=test_name
+        )
+        
+        if result['success']:
+            return jsonify({
+                'status': 'success',
+                'message': 'Successfully shipped changes to WordPress',
+                'data': result
+            }), 200
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': result['error']
+            }), 400
+        
+    except Exception as e:
+        logger.error(f"WordPress ship endpoint error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error',
+            'details': str(e) if app.debug else None
+        }), 500
+
+@app.route('/wordpress/test-connection', methods=['POST'])
+def test_wordpress_connection():
+    """
+    Test WordPress API connection
+    Expects JSON: {
+        "site_url": "https://your-site.com",
+        "username": "your-username",
+        "password": "your-app-password"
+    }
+    """
+    try:
+        # Check if WordPress integration is available
+        if not WORDPRESS_AVAILABLE:
+            return jsonify({
+                'status': 'error',
+                'message': 'WordPress integration not available. Required dependencies not installed.',
+                'available_features': 'This feature requires additional packages that are not available in the current deployment.'
+            }), 503
+        
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Request body is required'
+            }), 400
+        
+        # Validate required fields
+        required_fields = ['site_url', 'username', 'password']
+        for field in required_fields:
+            if not data.get(field):
+                return jsonify({
+                    'status': 'error',
+                    'message': f'{field} is required'
+                }), 400
+        
+        # Create WordPress configuration
+        wp_config = WordPressConfig(
+            site_url=data['site_url'],
+            username=data['username'],
+            password=data['password']
+        )
+        
+        # Test connection by trying to fetch pages
+        duplicator = WordPressPageDuplicator(wp_config)
+        
+        try:
+            response = duplicator.session.get(
+                f"{wp_config.api_url}/pages",
+                params={'per_page': 1}
+            )
+            response.raise_for_status()
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'WordPress connection successful',
+                'data': {
+                    'api_url': wp_config.api_url,
+                    'connection_verified': True,
+                    'pages_accessible': True
+                }
+            }), 200
+            
+        except requests.RequestException as e:
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to connect to WordPress API',
+                'details': str(e)
+            }), 400
+        
+    except Exception as e:
+        logger.error(f"WordPress test connection error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/wordpress/config', methods=['GET'])
+def get_wordpress_config():
+    """
+    Get WordPress configuration status
+    Returns information about available WordPress credentials and configuration
+    """
+    try:
+        # Check if WordPress integration is available
+        if not WORDPRESS_AVAILABLE:
+            return jsonify({
+                'status': 'error',
+                'message': 'WordPress integration not available. Required dependencies not installed.',
+                'available_features': 'This feature requires additional packages that are not available in the current deployment.'
+            }), 503
+        
+        credentials = get_wordpress_credentials()
+        wp_status = get_wordpress_status()
+        
+        return jsonify({
+            'status': 'success',
+            'data': {
+                'integration_status': wp_status,
+                'credentials_configured': credentials['configured'],
+                'site_url': credentials.get('site_url', 'Not configured'),
+                'username_configured': bool(credentials.get('username')),
+                'password_configured': bool(credentials.get('password')),
+                'environment_variables': {
+                    'WORDPRESS_SITE_URL': 'Set' if credentials.get('site_url') else 'Not set',
+                    'WORDPRESS_USERNAME': 'Set' if credentials.get('username') else 'Not set',
+                    'WORDPRESS_PASSWORD': 'Set' if credentials.get('password') else 'Not set'
+                },
+                'usage_note': 'You can either provide WordPress credentials in API requests or set them as environment variables'
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"WordPress config endpoint error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error'
+        }), 500
 
 # --- Proxy Font Endpoint (integrated with main API endpoints) ---
 from flask import Response, stream_with_context

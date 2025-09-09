@@ -1,7 +1,1 @@
-Flask
-requests
-beautifulsoup4
-lxml
-flask-cors
-urllib3
-dataclasses
+Flask==2.3.3

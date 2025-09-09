@@ -177,6 +177,77 @@ class FirebaseAuth:
             return {'error': 'Username not found in Firestore'}
         
         return {'username': username}
+    
+    def change_password(self, email, old_password, new_password):
+        """Change user password after verifying old password"""
+        try:
+            # Step 1: Verify old password by attempting authentication
+            auth_response = self._authenticate_firebase_user(email, old_password)
+            if 'error' in auth_response:
+                return {'error': 'Old password is incorrect'}
+            
+            id_token = auth_response['idToken']
+            
+            # Step 2: Change password using Firebase Auth API
+            password_change_response = self._update_firebase_password(id_token, new_password)
+            if 'error' in password_change_response:
+                return password_change_response
+            
+            return {'success': True, 'message': 'Password changed successfully'}
+            
+        except Exception as e:
+            logger.error(f"Change password error: {str(e)}")
+            return {'error': 'Failed to change password', 'details': str(e)}
+    
+    def forgot_password(self, email):
+        """Send password reset email using Firebase Auth"""
+        try:
+            reset_response = self._send_password_reset_email(email)
+            if 'error' in reset_response:
+                return reset_response
+            
+            return {'success': True, 'message': 'Password reset email sent successfully'}
+            
+        except Exception as e:
+            logger.error(f"Forgot password error: {str(e)}")
+            return {'error': 'Failed to send password reset email', 'details': str(e)}
+    
+    def _send_password_reset_email(self, email):
+        """Send password reset email using Firebase Auth API"""
+        url = f"{self.auth_url}:sendOobCode?key={self.api_key}"
+        
+        payload = {
+            "requestType": "PASSWORD_RESET",
+            "email": email
+        }
+        
+        response = requests.post(url, json=payload)
+        data = response.json()
+        
+        if response.status_code != 200:
+            error_message = data.get('error', {}).get('message', 'Unknown error')
+            return {'error': f'Firebase Auth error: {error_message}'}
+        
+        return {'success': True}
+    
+    def _update_firebase_password(self, id_token, new_password):
+        """Update user password using Firebase Auth API"""
+        url = f"{self.auth_url}:update?key={self.api_key}"
+        
+        payload = {
+            "idToken": id_token,
+            "password": new_password,
+            "returnSecureToken": True
+        }
+        
+        response = requests.post(url, json=payload)
+        data = response.json()
+        
+        if response.status_code != 200:
+            error_message = data.get('error', {}).get('message', 'Unknown error')
+            return {'error': f'Firebase Auth error: {error_message}'}
+        
+        return {'success': True}
 
 # Cerebras AI Integration Class
 class CerebrasAI:
@@ -358,7 +429,9 @@ def home():
             'scrape-complete': '/scrape-complete',
             'scrape-ai': '/scrape-ai',
             'register': '/auth/register',
-            'login': '/auth/login'
+            'login': '/auth/login',
+            'change_password': '/auth/change-password',
+            'forgot_password': '/auth/forgot-password'
         },
         'ai_features': {
             'headline_optimization': True,
@@ -898,6 +971,107 @@ def login():
         return jsonify({
             'status': 'error',
             'message': 'Login failed'
+        }), 500
+
+@app.route('/auth/change-password', methods=['POST'])
+def change_password():
+    """
+    Change user password
+    Expects JSON: {"email": "user@example.com", "old_password": "current_password", "new_password": "new_password"}
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Request body is required'
+            }), 400
+        
+        email = data.get('email')
+        old_password = data.get('old_password')
+        new_password = data.get('new_password')
+        
+        if not all([email, old_password, new_password]):
+            return jsonify({
+                'status': 'error',
+                'message': 'Email, old password, and new password are required'
+            }), 400
+        
+        # Basic validation
+        if len(new_password) < 6:
+            return jsonify({
+                'status': 'error',
+                'message': 'New password must be at least 6 characters'
+            }), 400
+        
+        result = firebase_auth.change_password(email, old_password, new_password)
+        
+        if 'error' in result:
+            return jsonify({
+                'status': 'error',
+                'message': result['error']
+            }), 400
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Password changed successfully'
+        })
+        
+    except Exception as e:
+        logger.error(f"Change password endpoint error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Failed to change password'
+        }), 500
+
+@app.route('/auth/forgot-password', methods=['POST'])
+def forgot_password():
+    """
+    Send password reset email
+    Expects JSON: {"email": "user@example.com"}
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Request body is required'
+            }), 400
+        
+        email = data.get('email')
+        
+        if not email:
+            return jsonify({
+                'status': 'error',
+                'message': 'Email is required'
+            }), 400
+        
+        if '@' not in email or '.' not in email:
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid email format'
+            }), 400
+        
+        result = firebase_auth.forgot_password(email)
+        
+        if 'error' in result:
+            return jsonify({
+                'status': 'error',
+                'message': result['error']
+            }), 400
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Password reset email sent successfully'
+        })
+        
+    except Exception as e:
+        logger.error(f"Forgot password endpoint error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Failed to send password reset email'
         }), 500
 
 if __name__ == '__main__':

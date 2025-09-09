@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
@@ -7,11 +7,248 @@ from urllib.parse import urljoin, urlparse
 import logging
 import os
 import json
+import base64
 from datetime import datetime
 ##hello from saim
 
+def download_and_inline_resources(html_content, base_url):
+    """
+    Download all external resources and inline them to create a completely self-contained HTML file
+    """
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        
+        # Download and inline CSS files
+        for link in soup.find_all('link', rel='stylesheet'):
+            if link.get('href'):
+                try:
+                    css_url = urljoin(base_url, link['href'])
+                    logging.info(f"Downloading CSS: {css_url}")
+                    css_response = session.get(css_url, timeout=15)
+                    if css_response.status_code == 200:
+                        # Process CSS to inline fonts and images
+                        css_content = process_css_content(css_response.text, css_url, session)
+                        
+                        # Replace link tag with style tag
+                        style_tag = soup.new_tag('style')
+                        style_tag.string = css_content
+                        style_tag.attrs['data-original-href'] = css_url
+                        link.replace_with(style_tag)
+                        logging.info(f"Successfully inlined CSS: {css_url}")
+                    else:
+                        logging.warning(f"Failed to download CSS {css_url}: HTTP {css_response.status_code}")
+                        # Don't remove the link, let it load externally with our permissive CSP
+                except Exception as e:
+                    logging.warning(f"Failed to download CSS {link.get('href')}: {str(e)}")
+                    # Don't remove the link, let it load externally
+        
+        # Process existing style tags
+        for style in soup.find_all('style'):
+            if style.string:
+                original_css = style.string
+                processed_css = process_css_content(original_css, base_url, session)
+                style.string = processed_css
+        
+        # Remove external script tags that might cause CORS issues
+        for script in soup.find_all('script', src=True):
+            src = script.get('src')
+            if src and (src.startswith('http') or src.startswith('//')):
+                # Remove external scripts that make AJAX calls
+                script.decompose()
+                logging.info(f"Removed external script: {src}")
+        
+        # Remove inline scripts that make external AJAX calls
+        for script in soup.find_all('script'):
+            if script.string and 'admin-ajax.php' in script.string:
+                script.decompose()
+                logging.info("Removed script with admin-ajax.php call")
+        
+        # Process images - download and convert to data URLs for better compatibility
+        for img in soup.find_all('img', src=True):
+            if img.get('src'):
+                try:
+                    img_url = urljoin(base_url, img['src'])
+                    if img_url.startswith('data:'):
+                        continue  # Skip if already a data URL
+                    
+                    logging.info(f"Downloading image: {img_url}")
+                    img_response = session.get(img_url, timeout=10)
+                    if img_response.status_code == 200 and len(img_response.content) < 2000000:  # Limit to 2MB
+                        # Determine MIME type
+                        content_type = img_response.headers.get('content-type', '')
+                        if not content_type:
+                            if img_url.lower().endswith('.png'):
+                                content_type = 'image/png'
+                            elif img_url.lower().endswith(('.jpg', '.jpeg')):
+                                content_type = 'image/jpeg'
+                            elif img_url.lower().endswith('.gif'):
+                                content_type = 'image/gif'
+                            elif img_url.lower().endswith('.svg'):
+                                content_type = 'image/svg+xml'
+                            elif img_url.lower().endswith('.webp'):
+                                content_type = 'image/webp'
+                            else:
+                                content_type = 'application/octet-stream'
+                        
+                        # Convert to base64 data URL
+                        img_data = base64.b64encode(img_response.content).decode('utf-8')
+                        img['src'] = f"data:{content_type};base64,{img_data}"
+                        img['data-original-src'] = img_url
+                        logging.info(f"Successfully converted image to data URL: {img_url}")
+                    else:
+                        if img_response.status_code != 200:
+                            logging.warning(f"Failed to download image {img_url}: HTTP {img_response.status_code}")
+                        else:
+                            logging.warning(f"Image too large, skipping: {img_url} ({len(img_response.content)} bytes)")
+                except Exception as e:
+                    logging.warning(f"Failed to process image {img.get('src')}: {str(e)}")
+        
+        # Handle lazy-loaded images (data-src, data-lazy-src, etc.)
+        for img in soup.find_all('img'):
+            for attr in ['data-src', 'data-lazy-src', 'data-original', 'data-lazy']:
+                if img.get(attr):
+                    try:
+                        img_url = urljoin(base_url, img[attr])
+                        if img_url.startswith('data:'):
+                            continue
+                        
+                        logging.info(f"Processing lazy image: {img_url}")
+                        img_response = session.get(img_url, timeout=10)
+                        if img_response.status_code == 200 and len(img_response.content) < 2000000:
+                            content_type = img_response.headers.get('content-type', 'image/jpeg')
+                            img_data = base64.b64encode(img_response.content).decode('utf-8')
+                            
+                            # Set both src and the lazy attributes
+                            img['src'] = f"data:{content_type};base64,{img_data}"
+                            img[attr] = f"data:{content_type};base64,{img_data}"
+                            
+                            logging.info(f"Successfully converted lazy image: {img_url}")
+                            break  # Only process the first valid lazy attribute
+                    except Exception as e:
+                        logging.warning(f"Failed to process lazy image {img.get(attr)}: {str(e)}")
+        
+        # Remove problematic meta tags
+        for meta in soup.find_all('meta'):
+            if meta.get('http-equiv') == 'Content-Security-Policy':
+                meta.decompose()
+        
+        # Add meta tag with more permissive CSP for stylesheets
+        if soup.head:
+            # Remove existing CSP meta tags that might conflict
+            for meta in soup.find_all('meta'):
+                if meta.get('http-equiv') == 'Content-Security-Policy':
+                    meta.decompose()
+            
+            csp_meta = soup.new_tag('meta')
+            csp_meta.attrs['http-equiv'] = 'Content-Security-Policy'
+            # Much more permissive CSP - allow most things except dangerous scripts
+            csp_meta.attrs['content'] = "default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; script-src * 'unsafe-inline' 'unsafe-eval'; style-src * 'unsafe-inline'; img-src * data: blob:;"
+            soup.head.insert(0, csp_meta)
+        
+        return str(soup)
+    except Exception as e:
+        logging.error(f"Error processing resources: {str(e)}")
+        return html_content
+
+def process_css_content(css_content, css_base_url, session):
+    """
+    Process CSS content to inline fonts and handle imports
+    """
+    try:
+        # Handle @import statements
+        import_pattern = r'@import\s+(?:url\()?[\'"]?([^\'")]+)[\'"]?\)?[^;]*;'
+        def replace_import(match):
+            import_url = urljoin(css_base_url, match.group(1))
+            try:
+                import_response = session.get(import_url, timeout=10)
+                if import_response.status_code == 200:
+                    return process_css_content(import_response.text, import_url, session)
+            except Exception as e:
+                logging.warning(f"Failed to import CSS {import_url}: {str(e)}")
+            return ""  # Remove import if failed
+        
+        css_content = re.sub(import_pattern, replace_import, css_content)
+        
+        # Handle font URLs - convert to data URLs
+        font_pattern = r'url\([\'"]?([^\'")]+\.(?:woff2?|ttf|eot|otf)(?:\?[^\'")]*)?)[\'"]?\)'
+        def replace_font_url(match):
+            font_url = urljoin(css_base_url, match.group(1))
+            try:
+                logging.info(f"Downloading font: {font_url}")
+                font_response = session.get(font_url, timeout=20)
+                if font_response.status_code == 200:
+                    # Determine MIME type based on extension
+                    if font_url.endswith('.woff2'):
+                        mime_type = 'font/woff2'
+                    elif font_url.endswith('.woff'):
+                        mime_type = 'font/woff'
+                    elif font_url.endswith('.ttf'):
+                        mime_type = 'font/truetype'
+                    elif font_url.endswith('.eot'):
+                        mime_type = 'application/vnd.ms-fontobject'
+                    elif font_url.endswith('.otf'):
+                        mime_type = 'font/opentype'
+                    else:
+                        mime_type = 'application/octet-stream'
+                    
+                    # Convert to base64 data URL
+                    font_data = base64.b64encode(font_response.content).decode('utf-8')
+                    logging.info(f"Successfully converted font to data URL: {font_url}")
+                    return f'url("data:{mime_type};base64,{font_data}")'
+                else:
+                    logging.warning(f"Failed to download font {font_url}: HTTP {font_response.status_code}")
+            except Exception as e:
+                logging.warning(f"Failed to download font {font_url}: {str(e)}")
+            
+            # Return original URL if conversion failed - let it load externally
+            return match.group(0)
+        
+        css_content = re.sub(font_pattern, replace_font_url, css_content)
+        
+        # Handle background images in CSS
+        bg_pattern = r'url\([\'"]?([^\'")]+\.(?:jpg|jpeg|png|gif|svg|webp)(?:\?[^\'")]*)?)[\'"]?\)'
+        def replace_bg_url(match):
+            img_url = urljoin(css_base_url, match.group(1))
+            try:
+                img_response = session.get(img_url, timeout=10)
+                if img_response.status_code == 200 and len(img_response.content) < 500000:  # Limit to 500KB
+                    # Determine MIME type
+                    content_type = img_response.headers.get('content-type', '')
+                    if not content_type:
+                        if img_url.endswith('.png'):
+                            content_type = 'image/png'
+                        elif img_url.endswith('.jpg') or img_url.endswith('.jpeg'):
+                            content_type = 'image/jpeg'
+                        elif img_url.endswith('.gif'):
+                            content_type = 'image/gif'
+                        elif img_url.endswith('.svg'):
+                            content_type = 'image/svg+xml'
+                        elif img_url.endswith('.webp'):
+                            content_type = 'image/webp'
+                        else:
+                            content_type = 'application/octet-stream'
+                    
+                    # Convert to base64 data URL
+                    img_data = base64.b64encode(img_response.content).decode('utf-8')
+                    return f'url("data:{content_type};base64,{img_data}")'
+            except Exception as e:
+                logging.warning(f"Failed to download background image {img_url}: {str(e)}")
+            
+            return match.group(0)  # Return original if failed
+        
+        css_content = re.sub(bg_pattern, replace_bg_url, css_content)
+        
+        return css_content
+    except Exception as e:
+        logging.error(f"Error processing CSS content: {str(e)}")
+        return css_content
+
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=['*'], allow_headers=['*'], methods=['*'])
 
 
 
@@ -152,7 +389,7 @@ class FirebaseAuth:
             "fields": {
                 "username": {"stringValue": username},
                 "email": {"stringValue": email},
-                "created_at": {"timestampValue": datetime.utcnow().isoformat() + "Z"}
+                "created_at": {"timestampValue": datetime.now(datetime.timezone.utc).isoformat()}
             }
         }
         
@@ -344,7 +581,7 @@ class CerebrasAI:
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You are an expert SEO copywriter and digital marketing specialist. Your job is to create compelling, SEO-optimized content that increases click-through rates and conversions."
+                        "content": "You are an expert SEO copywriter and digital marketing specialist. Your job is to create compelling, SEO-optimized content that increases click-through rates and conversions. IMPORTANT: Always respond in the same language as the original content. If the original content is in French, respond in French. If it's in English, respond in English. Maintain the same linguistic style and cultural context as the original."
                     },
                     {
                         "role": "user", 
@@ -377,7 +614,35 @@ class CerebrasAI:
     
     def _create_content_optimization_prompt(self, content, content_type, context):
         """Create an optimized prompt based on content type"""
-        base_context = f"Website Context: {context if context else 'General website'}"
+        
+        # Detect language based on content
+        def detect_language(text):
+            # Simple language detection based on common French words/patterns
+            french_indicators = [
+                'le ', 'la ', 'les ', 'un ', 'une ', 'des ', 'du ', 'de la ', 'de ',
+                'avec', 'pour', 'sur', 'dans', 'et ', 'ou ', 'mais', 'donc',
+                'à ', 'au ', 'aux ', 'en ', 'par ', 'chez',
+                'économies', 'électricité', 'solaire', 'énergie',
+                "d'", "l'", "c'", "n'", "s'", "t'", "m'"
+            ]
+            
+            text_lower = text.lower()
+            french_count = sum(1 for indicator in french_indicators if indicator in text_lower)
+            
+            if french_count >= 2:  # If we find 2+ French indicators, likely French
+                return "French"
+            else:
+                return "English"
+        
+        detected_language = detect_language(content)
+        
+        # Language-specific instructions
+        if detected_language == "French":
+            language_instruction = "IMPORTANT: Respond in French. Use proper French grammar, vocabulary, and cultural context. Consider French SEO practices and local market preferences."
+        else:
+            language_instruction = "Respond in English with clear, engaging copy."
+        
+        base_context = f"Website Context: {context if context else 'General website'}\n{language_instruction}"
         
         if content_type == "headline":
             return f"""
@@ -676,6 +941,9 @@ class WebScraper:
             
             # Remove unwanted elements BEFORE extracting content
             soup = self._remove_unwanted_elements(soup)
+            
+            # For now, use the original HTML without proxy rewriting
+            # The new self-contained endpoint handles CORS issues differently
             
             # Extract data
             scraped_data = {
@@ -1116,7 +1384,7 @@ class WebScraper:
         ]
         
         # Look for text containing CTA phrases
-        all_text_elements = soup.find_all(text=True)
+        all_text_elements = soup.find_all(string=True)
         
         for text in all_text_elements:
             text = text.strip()
@@ -1328,7 +1596,10 @@ def health_check():
             'change_password': '/auth/change-password',
             'forgot_password': '/auth/forgot-password',
             'scrape': '/scrape',
-            'scrape_complete': '/scrape-complete'
+            'scrape_complete': '/scrape-complete',
+            'wordpress_ship': '/wordpress/ship' if WORDPRESS_AVAILABLE else None,
+            'wordpress_test': '/wordpress/test-connection' if WORDPRESS_AVAILABLE else None,
+            'wordpress_config': '/wordpress/config' if WORDPRESS_AVAILABLE else None
         },
         'ai_features': {
             'headline_optimization': True,
@@ -1338,7 +1609,8 @@ def health_check():
             'model': 'cerebras-llama3.1-8b',
             'suggestions_per_item': 10,
             'content_types_supported': ['headline', 'subheadline', 'description', 'cta']
-        }
+        },
+        'wordpress_integration': get_wordpress_status()
     })
 
 @app.route('/auth/register', methods=['POST'])
@@ -1671,6 +1943,450 @@ def scrape_endpoint():
     
     except Exception as e:
         logger.error(f"AI-enhanced scraping API error: {str(e)}")
+        error_response = jsonify({
+            'status': 'error',
+            'message': 'Internal server error'
+        })
+        error_response.headers.add('Access-Control-Allow-Origin', '*')
+        error_response.headers.add('Access-Control-Allow-Headers', '*')
+        error_response.headers.add('Access-Control-Allow-Methods', '*')
+        return error_response, 500
+
+@app.route('/scrape-self-contained', methods=['POST'])
+def scrape_self_contained():
+    """
+    Create a completely self-contained HTML file with all resources inlined
+    This avoids ALL CORS issues by downloading and embedding everything
+    """
+    try:
+        logger.info("Self-contained scraping endpoint called")
+        data = request.get_json()
+        
+        if not data or 'url' not in data:
+            logger.error("No URL provided in request")
+            return jsonify({
+                'status': 'error',
+                'message': 'URL is required in request body'
+            }), 400
+        
+        url = data['url']
+        logger.info(f"Processing self-contained scrape for URL: {url}")
+        
+        # Set up session with proper headers
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        })
+        
+        logger.info(f"Fetching self-contained version of: {url}")
+        
+        # Get the main page
+        response = session.get(url, timeout=30)
+        response.raise_for_status()
+        
+        # Process and inline all resources
+        self_contained_html = download_and_inline_resources(response.text, url)
+        
+        # Add additional security and performance improvements
+        soup = BeautifulSoup(self_contained_html, 'html.parser')
+        
+        # Add viewport meta tag if not present
+        if soup.head and not soup.find('meta', attrs={'name': 'viewport'}):
+            viewport_meta = soup.new_tag('meta')
+            viewport_meta.attrs['name'] = 'viewport'
+            viewport_meta.attrs['content'] = 'width=device-width, initial-scale=1.0'
+            soup.head.insert(0, viewport_meta)
+        
+        # Add charset meta tag if not present
+        if soup.head and not soup.find('meta', attrs={'charset': True}):
+            charset_meta = soup.new_tag('meta')
+            charset_meta.attrs['charset'] = 'UTF-8'
+            soup.head.insert(0, charset_meta)
+        
+        # Remove any remaining external references that might cause issues
+        for tag in soup.find_all(['iframe', 'embed', 'object']):
+            tag.decompose()
+        
+        # Remove external forms that might not work
+        for form in soup.find_all('form'):
+            action = form.get('action', '')
+            if action and action.startswith('http') and not action.startswith(url):
+                form.decompose()
+        
+        final_html = str(soup)
+        
+        # Store the HTML for direct serving
+        import uuid
+        html_id = str(uuid.uuid4())
+        if not hasattr(serve_html, 'html_cache'):
+            serve_html.html_cache = {}
+        serve_html.html_cache[html_id] = final_html
+        
+        return jsonify({
+            'status': 'success',
+            'html': final_html,
+            'url': url,
+            'serve_url': f'http://127.0.0.1:5000/serve-html/{html_id}',
+            'html_id': html_id,
+            'processing_info': {
+                'type': 'self_contained',
+                'size': len(final_html),
+                'description': 'All external resources have been downloaded and inlined. This HTML is completely self-contained and will not make any external requests.',
+                'cors_safe': True
+            }
+        })
+    
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request error for {url}: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Failed to fetch website: {str(e)}'
+        }), 400
+    
+    except Exception as e:
+        logger.error(f"Self-contained scraping error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/apply-changes', methods=['POST'])
+def apply_changes():
+    """
+    Apply text changes to HTML content server-side to avoid CORS issues
+    """
+    try:
+        data = request.get_json()
+        
+        if not data or 'html' not in data or 'changes' not in data:
+            return jsonify({
+                'status': 'error',
+                'message': 'HTML content and changes are required'
+            }), 400
+        
+        html_content = data['html']
+        changes = data['changes']  # Array of {original: string, modified: string}
+        
+        logger.info(f"Applying {len(changes)} text changes server-side")
+        
+        # Apply each change to the HTML content
+        modified_html = html_content
+        for change in changes:
+            if 'original' in change and 'modified' in change:
+                original_text = change['original']
+                modified_text = change['modified']
+                
+                logger.info(f"Attempting to replace: '{original_text}' -> '{modified_text}'")
+                logger.info(f"Original text length: {len(original_text)}")
+                
+                # Try 0: Handle emoji-prefixed text specifically
+                import re
+                import unicodedata
+                
+                # Check if the text starts with emojis
+                emoji_pattern = re.compile(
+                    "["
+                    "\U0001F600-\U0001F64F"  # emoticons
+                    "\U0001F300-\U0001F5FF"  # symbols & pictographs
+                    "\U0001F680-\U0001F6FF"  # transport & map symbols
+                    "\U0001F1E0-\U0001F1FF"  # flags (iOS)
+                    "\U00002702-\U000027B0"  # dingbats
+                    "\U000024C2-\U0001F251"
+                    "✅✓☑️"  # checkmarks
+                    "]+", flags=re.UNICODE
+                )
+                
+                emojis_in_original = emoji_pattern.findall(original_text)
+                if emojis_in_original:
+                    logger.info(f"Found emojis in text: {emojis_in_original}")
+                    
+                    # Try multiple emoji-aware approaches
+                    text_without_emojis = emoji_pattern.sub('', original_text).strip()
+                    
+                    # Method 0a: Look for text without emojis and replace with emoji included in new text
+                    if text_without_emojis and text_without_emojis in modified_html:
+                        emoji_prefix = ''.join(emojis_in_original)
+                        full_replacement = emoji_prefix + modified_text
+                        modified_html = modified_html.replace(text_without_emojis, full_replacement, 1)
+                        logger.info(f"✅ Applied emoji-aware replacement: '{original_text[:50]}...' -> '{full_replacement[:50]}...'")
+                        continue
+                    
+                    # Method 0b: Try with normalized Unicode
+                    normalized_original = unicodedata.normalize('NFC', original_text)
+                    normalized_content = unicodedata.normalize('NFC', modified_html)
+                    
+                    if normalized_original in normalized_content:
+                        modified_html = normalized_content.replace(normalized_original, modified_text, 1)
+                        logger.info(f"✅ Applied Unicode normalized emoji replacement: '{original_text[:50]}...' -> '{modified_text[:50]}...'")
+                        continue
+                    
+                    # Method 0c: Try with HTML entity decoding
+                    import html
+                    html_decoded_original = html.unescape(original_text)
+                    html_decoded_content = html.unescape(modified_html)
+                    
+                    if html_decoded_original in html_decoded_content:
+                        # Replace in decoded content and encode back
+                        decoded_modified = html_decoded_content.replace(html_decoded_original, modified_text, 1)
+                        modified_html = decoded_modified
+                        logger.info(f"✅ Applied HTML decoded emoji replacement: '{original_text[:50]}...' -> '{modified_text[:50]}...'")
+                        continue
+                
+                # Try 1: Direct text replacement (fastest)
+                if original_text in modified_html:
+                    modified_html = modified_html.replace(original_text, modified_text, 1)
+                    logger.info(f"✅ Applied direct change: '{original_text[:50]}...' -> '{modified_text[:50]}...'")
+                    continue
+                
+                # Try 2: BeautifulSoup - Handle HTML tags and nested content
+                try:
+                    soup = BeautifulSoup(modified_html, 'html.parser')
+                    replaced = False
+                    
+                    # Method 2a: Find all text nodes and check for matches
+                    for element in soup.find_all(string=True):
+                        element_text = str(element).strip()
+                        if original_text in element_text:
+                            new_text = element_text.replace(original_text, modified_text, 1)
+                            element.replace_with(new_text)
+                            replaced = True
+                            logger.info(f"✅ Applied text node change: '{original_text[:50]}...' -> '{modified_text[:50]}...'")
+                            break
+                    
+                    if replaced:
+                        modified_html = str(soup)
+                        continue
+                    
+                    # Method 2b: Advanced nested HTML handling
+                    for element in soup.find_all():
+                        if element.get_text() and original_text in element.get_text():
+                            element_text = element.get_text()
+                            
+                            # If exact match of text content, replace the entire element content
+                            if element_text.strip() == original_text.strip():
+                                element.string = modified_text
+                                replaced = True
+                                logger.info(f"✅ Applied element replacement: '{original_text[:50]}...' -> '{modified_text[:50]}...'")
+                                break
+                            
+                            # For partial matches with HTML tags, try comprehensive replacement
+                            elif original_text in element_text:
+                                # Method 1: Direct HTML string replacement
+                                element_html = str(element)
+                                if original_text in element_html:
+                                    new_element_html = element_html.replace(original_text, modified_text, 1)
+                                    try:
+                                        new_element = BeautifulSoup(new_element_html, 'html.parser')
+                                        element.replace_with(new_element)
+                                        replaced = True
+                                        logger.info(f"✅ Applied HTML string replacement: '{original_text[:50]}...' -> '{modified_text[:50]}...'")
+                                        break
+                                    except:
+                                        pass
+                                
+                                # Method 2: Normalize text and match with whitespace flexibility
+                                import unicodedata
+                                import re
+                                
+                                # Normalize both texts to handle French accents and special chars
+                                normalized_original = unicodedata.normalize('NFKD', original_text)
+                                normalized_element_text = unicodedata.normalize('NFKD', element_text)
+                                
+                                # Try normalized text replacement
+                                if normalized_original in normalized_element_text:
+                                    element.clear()
+                                    element.string = modified_text
+                                    replaced = True
+                                    logger.info(f"✅ Applied normalized replacement: '{original_text[:50]}...' -> '{modified_text[:50]}...'")
+                                    break
+                                
+                                # Method 3: Word-by-word matching with HTML tolerance
+                                original_words = re.findall(r'\S+', original_text)
+                                if len(original_words) > 2:  # Only for multi-word text
+                                    # Check if most words are present
+                                    words_found = sum(1 for word in original_words if word in element_text)
+                                    if words_found >= len(original_words) * 0.8:  # 80% of words match
+                                        element.clear()
+                                        element.string = modified_text
+                                        replaced = True
+                                        logger.info(f"✅ Applied word-based replacement: '{original_text[:50]}...' -> '{modified_text[:50]}...'")
+                                        break
+                                
+                                # Method 4: Handle text split across multiple child elements
+                                child_texts = []
+                                for child in element.descendants:
+                                    if isinstance(child, str) and child.strip():
+                                        child_texts.append(child.strip())
+                                
+                                combined_child_text = ' '.join(child_texts)
+                                if original_text in combined_child_text:
+                                    element.clear()
+                                    element.string = modified_text
+                                    replaced = True
+                                    logger.info(f"✅ Applied child text reconstruction: '{original_text[:50]}...' -> '{modified_text[:50]}...'")
+                                    break
+                                
+                                # Method 5: Flexible matching ignoring extra whitespace and punctuation
+                                clean_original = re.sub(r'\s+', ' ', original_text.strip())
+                                clean_element = re.sub(r'\s+', ' ', element_text.strip())
+                                
+                                if clean_original in clean_element:
+                                    element.clear()
+                                    element.string = modified_text
+                                    replaced = True
+                                    logger.info(f"✅ Applied clean text replacement: '{original_text[:50]}...' -> '{modified_text[:50]}...'")
+                                    break
+                    
+                    if replaced:
+                        modified_html = str(soup)
+                        continue
+                
+                except Exception as e:
+                    logger.warning(f"BeautifulSoup processing failed: {e}")
+                
+                # Try 3: Flexible regex approach for HTML content with tags
+                try:
+                    import re
+                    
+                    # Method 3a: Handle text that might be split across HTML tags
+                    words = original_text.split()
+                    if len(words) > 1:
+                        # Build pattern that allows HTML tags between words
+                        pattern_parts = []
+                        for word in words:
+                            pattern_parts.append(re.escape(word))
+                        
+                        # Pattern allows tags, whitespace, and other content between words
+                        flexible_pattern = r'(?:<[^>]*>|\s)*'.join(pattern_parts)
+                        
+                        if re.search(flexible_pattern, modified_html, re.IGNORECASE | re.DOTALL):
+                            modified_html = re.sub(flexible_pattern, modified_text, modified_html, count=1, flags=re.IGNORECASE | re.DOTALL)
+                            logger.info(f"✅ Applied flexible regex: '{original_text[:50]}...' -> '{modified_text[:50]}...'")
+                            continue
+                    
+                    # Method 3b: Try exact match with case insensitive
+                    escaped_original = re.escape(original_text)
+                    if re.search(escaped_original, modified_html, re.IGNORECASE):
+                        modified_html = re.sub(escaped_original, modified_text, modified_html, count=1, flags=re.IGNORECASE)
+                        logger.info(f"✅ Applied exact regex: '{original_text[:50]}...' -> '{modified_text[:50]}...'")
+                        continue
+                
+                except Exception as regex_error:
+                    logger.warning(f"Regex replacement failed: {regex_error}")
+                
+                # If all methods fail, provide enhanced debugging
+                logger.warning(f"❌ Could not find text to replace: '{original_text[:50]}...'")
+                
+                # Enhanced debugging for failed replacements
+                try:
+                    soup_debug = BeautifulSoup(modified_html, 'html.parser')
+                    
+                    # Check if any part of the text exists
+                    words = original_text.split()
+                    found_words = []
+                    for word in words:
+                        if word in modified_html:
+                            found_words.append(word)
+                    
+                    if found_words:
+                        logger.info(f"Found partial words: {found_words}")
+                    
+                    # Look for similar text patterns
+                    first_few_words = ' '.join(words[:3]) if len(words) >= 3 else original_text
+                    if first_few_words in modified_html:
+                        logger.info(f"Found beginning of text: '{first_few_words}'")
+                    
+                    # Find elements containing any of the words
+                    for element in soup_debug.find_all():
+                        element_text = element.get_text() if element else ""
+                        if any(word in element_text for word in words[:3]):
+                            logger.info(f"Similar element found: '{element_text[:100]}...'")
+                            logger.info(f"Element HTML: {str(element)[:200]}...")
+                            break
+                            
+                except Exception as debug_error:
+                    logger.warning(f"Debug search failed: {debug_error}")
+        
+        return jsonify({
+            'status': 'success',
+            'html': modified_html,
+            'changes_applied': len(changes)
+        })
+
+    except Exception as e:
+        logger.error(f"Apply changes error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/serve-html/<path:html_id>', methods=['GET'])
+def serve_html(html_id):
+    """
+    Serve processed HTML directly with proper headers to avoid CORS issues
+    """
+    try:
+        # In a real implementation, you'd store the HTML in a database or cache
+        # For now, we'll use a simple in-memory storage
+        if not hasattr(serve_html, 'html_cache'):
+            serve_html.html_cache = {}
+        
+        if html_id not in serve_html.html_cache:
+            return "HTML not found", 404
+        
+        html_content = serve_html.html_cache[html_id]
+        
+        response = Response(html_content, mimetype='text/html')
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        response.headers['X-Frame-Options'] = 'ALLOWALL'
+        
+        return response
+    
+    except Exception as e:
+        logger.error(f"Serve HTML error: {str(e)}")
+        return "Internal server error", 500
+
+@app.route('/store-html', methods=['POST'])
+def store_html():
+    """
+    Store HTML content and return an ID for serving
+    """
+    try:
+        data = request.get_json()
+        
+        if not data or 'html' not in data:
+            return jsonify({
+                'status': 'error',
+                'message': 'HTML content is required'
+            }), 400
+        
+        html_content = data['html']
+        
+        # Generate a unique ID
+        import uuid
+        html_id = str(uuid.uuid4())
+        
+        # Store in cache
+        if not hasattr(serve_html, 'html_cache'):
+            serve_html.html_cache = {}
+        
+        serve_html.html_cache[html_id] = html_content
+        
+        return jsonify({
+            'status': 'success',
+            'html_id': html_id,
+            'serve_url': f'http://127.0.0.1:5000/serve-html/{html_id}'
+        })
+    
+    except Exception as e:
+        logger.error(f"Store HTML error: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': 'Internal server error'
@@ -1691,6 +2407,562 @@ def internal_error(error):
     }), 500
 
 
+
+# WordPress Integration (optional - only loaded when needed)
+try:
+    from wordpress_optional import (
+        WordPressPageDuplicator, 
+        WordPressConfig, 
+        ContentChange, 
+        parse_frontend_changes,
+        WORDPRESS_AVAILABLE,
+        get_wordpress_status,
+        get_wordpress_credentials
+    )
+    # Also import simple WordPress integration
+    from simple_wordpress import SimpleWordPressIntegration
+    logger.info(f"WordPress integration status: {'enabled' if WORDPRESS_AVAILABLE else 'disabled'}")
+except ImportError:
+    WORDPRESS_AVAILABLE = False
+    logger.warning("WordPress integration module not found")
+    
+    def get_wordpress_status():
+        return {
+            'available': False,
+            'status': 'disabled - module not found',
+            'features': []
+        }
+    
+    def get_wordpress_credentials():
+        return {
+            'configured': False,
+            'message': 'WordPress integration not available'
+        }
+
+@app.route('/wordpress/ship', methods=['POST'])
+def ship_to_wordpress():
+    """
+    Ship changes to WordPress - Create duplicate page with modified content
+    Expects JSON: {
+        "wordpress_config": {
+            "site_url": "https://your-site.com",
+            "username": "your-username", 
+            "password": "your-app-password"
+        },
+        "page_url": "https://your-site.com/original-page",
+        "saved_changes": {
+            "element-id-1": {"original": "...", "modified": "..."},
+            "element-id-2": {"original": "...", "modified": "..."}
+        },
+        "test_name": "Optional AB Test Name"
+    }
+    """
+    try:
+        # Check if WordPress integration is available
+        if not WORDPRESS_AVAILABLE:
+            return jsonify({
+                'status': 'error',
+                'message': 'WordPress integration not available. Required dependencies not installed.',
+                'available_features': 'This feature requires additional packages that are not available in the current deployment.'
+            }), 503
+        
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Request body is required'
+            }), 400
+        
+        # Validate required fields
+        wp_config_data = data.get('wordpress_config')
+        page_url = data.get('page_url')
+        saved_changes = data.get('saved_changes')
+        test_name = data.get('test_name')
+        
+        # Use environment variables as fallback for WordPress config
+        env_credentials = get_wordpress_credentials()
+        
+        if not wp_config_data and env_credentials['configured']:
+            wp_config_data = {
+                'site_url': env_credentials['site_url'],
+                'username': env_credentials['username'],
+                'password': env_credentials['password']
+            }
+            logger.info("Using WordPress credentials from environment variables")
+        
+        if not wp_config_data:
+            return jsonify({
+                'status': 'error',
+                'message': 'WordPress configuration is required (either in request body or environment variables)',
+                'note': 'Set WORDPRESS_SITE_URL, WORDPRESS_USERNAME, and WORDPRESS_PASSWORD environment variables'
+            }), 400
+        
+        if not page_url:
+            return jsonify({
+                'status': 'error',
+                'message': 'Page URL is required'
+            }), 400
+        
+        if not saved_changes:
+            return jsonify({
+                'status': 'error',
+                'message': 'Saved changes are required'
+            }), 400
+        
+        # Validate WordPress config
+        required_wp_fields = ['site_url', 'username', 'password']
+        for field in required_wp_fields:
+            if not wp_config_data.get(field):
+                return jsonify({
+                    'status': 'error',
+                    'message': f'WordPress {field} is required'
+                }), 400
+        
+        # Create WordPress configuration
+        wp_config = WordPressConfig(
+            site_url=wp_config_data['site_url'],
+            username=wp_config_data['username'],
+            password=wp_config_data['password']
+        )
+        
+        # Parse frontend changes
+        changes = parse_frontend_changes(saved_changes)
+        
+        # Debug logging
+        logger.info(f"🔍 Debug - Received saved_changes: {saved_changes}")
+        logger.info(f"🔍 Debug - Parsed {len(changes)} changes:")
+        for i, change in enumerate(changes):
+            logger.info(f"   Change {i+1}: '{change.original_text[:100]}...' -> '{change.modified_text[:100]}...'")
+        
+        if not changes:
+            return jsonify({
+                'status': 'error',
+                'message': 'No valid changes found to ship'
+            }), 400
+        
+        # 🚨 FINAL CSS FIX: Direct WordPress API with complete meta preservation
+        logger.info(f"🚨 FINAL CSS FIX: Starting WordPress shipping with CSS preservation...")
+        
+        try:
+            # Find original page by URL
+            from urllib.parse import urlparse
+            parsed_url = urlparse(page_url)
+            path = parsed_url.path.strip('/')
+            
+            # Search for the page by slug
+            search_response = requests.get(
+                f"{wp_config.site_url}/wp-json/wp/v2/pages",
+                params={'slug': path, 'per_page': 1},
+                auth=(wp_config.username, wp_config.password),
+                timeout=30
+            )
+            
+            if search_response.status_code != 200 or not search_response.json():
+                return jsonify({
+                    'status': 'error',
+                    'message': f'Page not found for URL: {page_url}'
+                }), 404
+            
+            original_page = search_response.json()[0]
+            logger.info(f"✅ FINAL: Found original page {original_page['id']}")
+            
+            # Get COMPLETE original page with ALL meta fields
+            full_response = requests.get(
+                f"{wp_config.site_url}/wp-json/wp/v2/pages/{original_page['id']}?context=edit",
+                auth=(wp_config.username, wp_config.password),
+                timeout=30
+            )
+            
+            if full_response.status_code != 200:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Failed to get complete page data'
+                }), 500
+            
+            full_original = full_response.json()
+            logger.info(f"📄 FINAL: Got complete page with {len(full_original.get('meta', {}))} meta fields")
+            
+            # Show critical meta fields for debugging
+            critical_fields = ['_elementor_data', '_elementor_css', '_wp_page_template']
+            for field in critical_fields:
+                if field in full_original.get('meta', {}):
+                    logger.info(f"   ✅ Original has {field}")
+                else:
+                    logger.info(f"   ❌ Original missing {field}")
+            
+            # 🚨 FINAL DUPLICATION: Create page with ALL meta fields included
+            suffix = test_name or f"CSS-FIXED-{datetime.now().strftime('%H%M%S')}"
+            
+            duplicate_data = {
+                'title': f"{full_original['title']['raw']} - {suffix}",
+                'content': full_original['content']['raw'],  # RAW content preserves everything
+                'excerpt': full_original.get('excerpt', {}).get('raw', ''),
+                'status': 'publish',
+                'template': full_original.get('template', ''),
+                'featured_media': full_original.get('featured_media', 0),
+                'parent': full_original.get('parent', 0),
+                'menu_order': full_original.get('menu_order', 0),
+                'comment_status': full_original.get('comment_status', 'closed'),
+                'ping_status': full_original.get('ping_status', 'closed'),
+                'meta': full_original.get('meta', {})  # 🔥 ALL META FIELDS INCLUDED!
+            }
+            
+            logger.info(f"🚀 FINAL: Creating duplicate with {len(duplicate_data.get('meta', {}))} meta fields...")
+            
+            create_response = requests.post(
+                f"{wp_config.site_url}/wp-json/wp/v2/pages",
+                json=duplicate_data,
+                auth=(wp_config.username, wp_config.password),
+                timeout=30
+            )
+            
+            if create_response.status_code not in [200, 201]:
+                logger.error(f"❌ FINAL: Failed to create duplicate: {create_response.status_code}")
+                logger.error(f"Response: {create_response.text[:300]}")
+                return jsonify({
+                    'status': 'error',
+                    'message': f'Failed to create duplicate page: {create_response.text[:200]}'
+                }), 500
+            
+            new_page = create_response.json()
+            logger.info(f"✅ FINAL SUCCESS: Created page {new_page['id']} with CSS preservation!")
+            
+            # Verify meta fields were copied
+            verify_response = requests.get(
+                f"{wp_config.site_url}/wp-json/wp/v2/pages/{new_page['id']}?context=edit",
+                auth=(wp_config.username, wp_config.password),
+                timeout=30
+            )
+            
+            if verify_response.status_code == 200:
+                verify_page = verify_response.json()
+                verify_meta = verify_page.get('meta', {})
+                logger.info(f"🔍 FINAL: Verification - New page has {len(verify_meta)} meta fields")
+                
+                for field in critical_fields:
+                    if field in verify_meta:
+                        logger.info(f"   ✅ Successfully copied {field}")
+                    else:
+                        logger.info(f"   ❌ LOST {field}")
+            
+            # Apply content changes if any
+            if changes:
+                logger.info(f"🔄 FINAL: Applying {len(changes)} content changes...")
+                
+                current_content = new_page['content']['raw']
+                modified_content = current_content
+                
+                for change in changes:
+                    if change.original_text in modified_content:
+                        modified_content = modified_content.replace(
+                            change.original_text, 
+                            change.modified_text, 
+                            1
+                        )
+                        logger.info(f"✅ FINAL: Applied change: {change.original_text[:50]}... -> {change.modified_text[:50]}...")
+                
+                # Update page content
+                update_response = requests.post(
+                    f"{wp_config.site_url}/wp-json/wp/v2/pages/{new_page['id']}",
+                    json={'content': modified_content},
+                    auth=(wp_config.username, wp_config.password),
+                    timeout=30
+                )
+                
+                if update_response.status_code == 200:
+                    logger.info(f"✅ FINAL: Content updated successfully")
+                    new_page = update_response.json()
+            
+            # Return final result
+            result = {
+                'success': True,
+                'message': 'FINAL CSS FIX: Successfully shipped to WordPress with CSS preservation!',
+                'original_page': {
+                    'id': original_page['id'],
+                    'title': original_page['title']['rendered'],
+                    'url': original_page['link']
+                },
+                'duplicate_page': {
+                    'id': new_page['id'],
+                    'title': new_page['title']['rendered'],
+                    'url': new_page['link'],
+                    'edit_url': f"{wp_config.site_url}/wp-admin/post.php?post={new_page['id']}&action=edit"
+                },
+                'changes_applied': len(changes),
+                'test_name': suffix,
+                'css_preservation': 'ENABLED'
+            }
+            
+            logger.info(f"🎉 FINAL SUCCESS: Created {new_page['link']}")
+            return jsonify({
+                'status': 'success',
+                'message': 'FINAL CSS FIX: Successfully shipped to WordPress with CSS preservation!',
+                'data': result
+            }), 200
+            
+        except Exception as e:
+            logger.error(f"❌ FINAL CSS FIX ERROR: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': f'FINAL CSS fix failed: {str(e)}'
+            }), 500
+        
+    except Exception as e:
+        logger.error(f"WordPress ship endpoint error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error',
+            'details': str(e) if app.debug else None
+        }), 500
+
+@app.route('/wordpress/test-connection', methods=['POST'])
+def test_wordpress_connection():
+    """
+    Test WordPress API connection
+    Expects JSON: {
+        "site_url": "https://your-site.com",
+        "username": "your-username",
+        "password": "your-app-password"
+    }
+    """
+    try:
+        # Check if WordPress integration is available
+        if not WORDPRESS_AVAILABLE:
+            return jsonify({
+                'status': 'error',
+                'message': 'WordPress integration not available. Required dependencies not installed.',
+                'available_features': 'This feature requires additional packages that are not available in the current deployment.'
+            }), 503
+        
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Request body is required'
+            }), 400
+        
+        # Validate required fields
+        required_fields = ['site_url', 'username', 'password']
+        for field in required_fields:
+            if not data.get(field):
+                return jsonify({
+                    'status': 'error',
+                    'message': f'{field} is required'
+                }), 400
+        
+        # Create WordPress configuration
+        wp_config = WordPressConfig(
+            site_url=data['site_url'],
+            username=data['username'],
+            password=data['password']
+        )
+        
+        # Test connection by trying to fetch pages
+        duplicator = WordPressPageDuplicator(wp_config)
+        
+        try:
+            response = duplicator.session.get(
+                f"{wp_config.api_url}/pages",
+                params={'per_page': 1}
+            )
+            response.raise_for_status()
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'WordPress connection successful',
+                'data': {
+                    'api_url': wp_config.api_url,
+                    'connection_verified': True,
+                    'pages_accessible': True
+                }
+            }), 200
+            
+        except requests.RequestException as e:
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to connect to WordPress API',
+                'details': str(e)
+            }), 400
+        
+    except Exception as e:
+        logger.error(f"WordPress test connection error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/wordpress/config', methods=['GET'])
+def get_wordpress_config():
+    """
+    Get WordPress configuration status
+    Returns information about available WordPress credentials and configuration
+    """
+    try:
+        # Check if WordPress integration is available
+        if not WORDPRESS_AVAILABLE:
+            return jsonify({
+                'status': 'error',
+                'message': 'WordPress integration not available. Required dependencies not installed.',
+                'available_features': 'This feature requires additional packages that are not available in the current deployment.'
+            }), 503
+        
+        credentials = get_wordpress_credentials()
+        wp_status = get_wordpress_status()
+        
+        return jsonify({
+            'status': 'success',
+            'data': {
+                'integration_status': wp_status,
+                'credentials_configured': credentials['configured'],
+                'site_url': credentials.get('site_url', 'Not configured'),
+                'username_configured': bool(credentials.get('username')),
+                'password_configured': bool(credentials.get('password')),
+                'environment_variables': {
+                    'WORDPRESS_SITE_URL': 'Set' if credentials.get('site_url') else 'Not set',
+                    'WORDPRESS_USERNAME': 'Set' if credentials.get('username') else 'Not set',
+                    'WORDPRESS_PASSWORD': 'Set' if credentials.get('password') else 'Not set'
+                },
+                'usage_note': 'You can either provide WordPress credentials in API requests or set them as environment variables'
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"WordPress config endpoint error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/wordpress/debug', methods=['POST'])
+def debug_wordpress_changes():
+    """
+    Debug endpoint to test content replacement without actually shipping
+    """
+    try:
+        if not WORDPRESS_AVAILABLE:
+            return jsonify({
+                'status': 'error',
+                'message': 'WordPress integration not available'
+            }), 503
+        
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Request body is required'
+            }), 400
+        
+        saved_changes = data.get('saved_changes', {})
+        test_content = data.get('test_content', '<p>Sample WordPress content</p>')
+        
+        # Parse changes
+        changes = parse_frontend_changes(saved_changes)
+        
+        debug_info = {
+            'received_changes': saved_changes,
+            'parsed_changes': [
+                {
+                    'element_id': c.element_id,
+                    'original': c.original_text,
+                    'modified': c.modified_text,
+                    'type': c.element_type
+                } for c in changes
+            ],
+            'original_content': test_content
+        }
+        
+        if changes:
+            # Test content replacement
+            from wordpress_integration import WordPressPageDuplicator, WordPressConfig
+            
+            # Create a dummy config for testing
+            dummy_config = WordPressConfig(
+                site_url="https://example.com",
+                username="test",
+                password="test"
+            )
+            
+            duplicator = WordPressPageDuplicator(dummy_config)
+            modified_content = duplicator.apply_content_changes(test_content, changes)
+            
+            debug_info['modified_content'] = modified_content
+            debug_info['changes_found'] = modified_content != test_content
+        
+        return jsonify({
+            'status': 'success',
+            'debug_info': debug_info
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"WordPress debug endpoint error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error',
+            'details': str(e)
+        }), 500
+
+@app.route('/generate-more-suggestions', methods=['POST'])
+def generate_more_suggestions():
+    """Generate more AI-powered suggestions for specific content"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'No data provided'
+            }), 400
+        
+        required_fields = ['content', 'content_type']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({
+                    'status': 'error',
+                    'message': f'Missing required field: {field}'
+                }), 400
+        
+        content = data['content']
+        content_type = data['content_type']
+        original_url = data.get('original_url', '')
+        
+        # Initialize Cerebras AI
+        cerebras_ai = CerebrasAI()
+        
+        # Generate suggestions using the existing method
+        result = cerebras_ai.generate_content_suggestions(
+            original_content=content,
+            content_type=content_type,
+            context=f"Original URL: {original_url}" if original_url else ""
+        )
+        
+        if 'error' in result:
+            return jsonify({
+                'status': 'error',
+                'message': result['error']
+            }), 500
+        
+        suggestions = result.get('suggestions', [])
+        if not suggestions:
+            return jsonify({
+                'status': 'error',
+                'message': 'No suggestions generated'
+            }), 500
+        
+        return jsonify({
+            'status': 'success',
+            'suggestions': suggestions
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Generate more suggestions error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error',
+            'details': str(e)
+        }), 500
 
 # --- Proxy Font Endpoint (integrated with main API endpoints) ---
 from flask import Response, stream_with_context

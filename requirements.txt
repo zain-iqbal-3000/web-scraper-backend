@@ -1,5 +1,7 @@
-flask
-flask-cors
+Flask
 requests
-bs4
+beautifulsoup4
+lxml
 flask-cors
+urllib3
+dataclasses

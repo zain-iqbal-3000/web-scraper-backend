@@ -19,6 +19,165 @@ logger = logging.getLogger(__name__)
 CEREBRAS_API_KEY = os.environ.get('CEREBRAS_API_KEY', 'csk-rkhkxny26c6rvj32cfd4wtwf8n3w8drncpx9j88dkk66fre6')
 CEREBRAS_API_URL = 'https://api.cerebras.ai/v1/chat/completions'
 
+# Firebase configuration
+FIREBASE_API_KEY = os.environ.get('FIREBASE_API_KEY', 'AIzaSyC7-xHHI-ip1uThgqc67DRh8ZgWPQZuVgI')
+FIREBASE_PROJECT_ID = os.environ.get('FIREBASE_PROJECT_ID', 'lp-optimization-97f9f')
+FIREBASE_AUTH_DOMAIN = f"{FIREBASE_PROJECT_ID}.firebaseapp.com"
+
+# Firebase Authentication Class
+class FirebaseAuth:
+    def __init__(self):
+        self.api_key = FIREBASE_API_KEY
+        self.auth_url = f"https://identitytoolkit.googleapis.com/v1/accounts"
+        self.firestore_url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents"
+    
+    def register_user(self, email, password, username):
+        """Register a new user with Firebase Auth and store username in Firestore"""
+        try:
+            # Step 1: Create user with Firebase Auth
+            auth_response = self._create_firebase_user(email, password)
+            if 'error' in auth_response:
+                return auth_response
+            
+            user_id = auth_response['localId']
+            id_token = auth_response['idToken']
+            
+            # Step 2: Store username and email in Firestore
+            firestore_response = self._store_user_data_in_firestore(user_id, username, email, id_token)
+            if 'error' in firestore_response:
+                return firestore_response
+            
+            return {
+                'success': True,
+                'user_id': user_id,
+                'username': username,
+                'email': email,
+                'token': id_token
+            }
+            
+        except Exception as e:
+            logger.error(f"Registration error: {str(e)}")
+            return {'error': 'Registration failed', 'details': str(e)}
+    
+    def login_user(self, email, password):
+        """Login user with Firebase Auth and get username from Firestore"""
+        try:
+            # Step 1: Authenticate with Firebase Auth
+            auth_response = self._authenticate_firebase_user(email, password)
+            if 'error' in auth_response:
+                return auth_response
+            
+            user_id = auth_response['localId']
+            id_token = auth_response['idToken']
+            
+            # Step 2: Get username from Firestore
+            username_response = self._get_username_from_firestore(user_id, id_token)
+            if 'error' in username_response:
+                # If username not found in Firestore, return basic info
+                return {
+                    'success': True,
+                    'user_id': user_id,
+                    'username': email.split('@')[0],  # Fallback username
+                    'email': auth_response.get('email', email),
+                    'token': id_token
+                }
+            
+            return {
+                'success': True,
+                'user_id': user_id,
+                'username': username_response['username'],
+                'email': auth_response.get('email', email),
+                'token': id_token
+            }
+            
+        except Exception as e:
+            logger.error(f"Login error: {str(e)}")
+            return {'error': 'Login failed', 'details': str(e)}
+    
+    def _create_firebase_user(self, email, password):
+        """Create user with Firebase Authentication"""
+        url = f"{self.auth_url}:signUp?key={self.api_key}"
+        
+        payload = {
+            "email": email,
+            "password": password,
+            "returnSecureToken": True
+        }
+        
+        response = requests.post(url, json=payload)
+        data = response.json()
+        
+        if response.status_code != 200:
+            error_message = data.get('error', {}).get('message', 'Unknown error')
+            return {'error': f'Firebase Auth error: {error_message}'}
+        
+        return data
+    
+    def _authenticate_firebase_user(self, email, password):
+        """Authenticate user with Firebase Authentication"""
+        url = f"{self.auth_url}:signInWithPassword?key={self.api_key}"
+        
+        payload = {
+            "email": email,
+            "password": password,
+            "returnSecureToken": True
+        }
+        
+        response = requests.post(url, json=payload)
+        data = response.json()
+        
+        if response.status_code != 200:
+            error_message = data.get('error', {}).get('message', 'Unknown error')
+            return {'error': f'Firebase Auth error: {error_message}'}
+        
+        return data
+    
+    def _store_user_data_in_firestore(self, user_id, username, email, id_token):
+        """Store username and email in Firestore"""
+        url = f"{self.firestore_url}/users/{user_id}"
+        
+        headers = {
+            'Authorization': f'Bearer {id_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        payload = {
+            "fields": {
+                "username": {"stringValue": username},
+                "email": {"stringValue": email},
+                "created_at": {"timestampValue": datetime.now(timezone.utc).isoformat()}
+            }
+        }
+        
+        response = requests.patch(url, json=payload, headers=headers)
+        
+        if response.status_code not in [200, 201]:
+            return {'error': 'Failed to store user data in Firestore'}
+        
+        return {'success': True}
+    
+    def _get_username_from_firestore(self, user_id, id_token):
+        """Get username from Firestore"""
+        url = f"{self.firestore_url}/users/{user_id}"
+        
+        headers = {
+            'Authorization': f'Bearer {id_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code != 200:
+            return {'error': 'Failed to get username from Firestore'}
+        
+        data = response.json()
+        username = data.get('fields', {}).get('username', {}).get('stringValue', '')
+        
+        if not username:
+            return {'error': 'Username not found in Firestore'}
+        
+        return {'username': username}
+
 # Cerebras AI Integration Class
 class CerebrasAI:
     def __init__(self):
@@ -182,21 +341,24 @@ Format as a numbered list (1-10)."""
             logger.error(f"Error parsing AI suggestions: {str(e)}")
             return ["Error parsing suggestions"]
 
-# Initialize AI
+# Initialize AI and Firebase
 cerebras_ai = CerebrasAI()
+firebase_auth = FirebaseAuth()
 
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
         'status': 'success',
-        'message': 'Web Scraper API with AI Enhancement is working!',
-        'version': '4.0.0',
+        'message': 'Web Scraper API with AI Enhancement and Firebase Auth is working!',
+        'version': '5.0.0',
         'endpoints': {
             'health': '/health',
             'test': '/test',
             'scrape': '/scrape',
             'scrape-complete': '/scrape-complete',
-            'scrape-ai': '/scrape-ai'
+            'scrape-ai': '/scrape-ai',
+            'register': '/auth/register',
+            'login': '/auth/login'
         },
         'ai_features': {
             'headline_optimization': True,
@@ -204,6 +366,12 @@ def home():
             'description_optimization': True,
             'cta_optimization': True,
             'model': 'cerebras-llama3.1-8b'
+        },
+        'auth_features': {
+            'firebase_auth': True,
+            'user_registration': True,
+            'user_login': True,
+            'firestore_storage': True
         }
     })
 
@@ -616,6 +784,120 @@ def scrape_ai():
         return jsonify({
             'status': 'error',
             'message': f'AI scraping error: {str(e)}'
+        }), 500
+
+@app.route('/auth/register', methods=['POST'])
+def register():
+    """
+    Register a new user
+    Expects JSON: {"email": "user@example.com", "password": "password123", "username": "john_doe"}
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Request body is required'
+            }), 400
+        
+        email = data.get('email')
+        password = data.get('password')
+        username = data.get('username')
+        
+        if not all([email, password, username]):
+            return jsonify({
+                'status': 'error',
+                'message': 'Email, password, and username are required'
+            }), 400
+        
+        # Basic validation
+        if len(password) < 6:
+            return jsonify({
+                'status': 'error',
+                'message': 'Password must be at least 6 characters'
+            }), 400
+        
+        if '@' not in email or '.' not in email:
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid email format'
+            }), 400
+        
+        result = firebase_auth.register_user(email, password, username)
+        
+        if 'error' in result:
+            return jsonify({
+                'status': 'error',
+                'message': result['error']
+            }), 400
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'User registered successfully',
+            'data': {
+                'user_id': result['user_id'],
+                'username': result['username'],
+                'email': result['email']
+            },
+            'token': result['token']
+        })
+        
+    except Exception as e:
+        logger.error(f"Registration endpoint error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Registration failed'
+        }), 500
+
+@app.route('/auth/login', methods=['POST'])
+def login():
+    """
+    Login user
+    Expects JSON: {"email": "user@example.com", "password": "password123"}
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Request body is required'
+            }), 400
+        
+        email = data.get('email')
+        password = data.get('password')
+        
+        if not all([email, password]):
+            return jsonify({
+                'status': 'error',
+                'message': 'Email and password are required'
+            }), 400
+        
+        result = firebase_auth.login_user(email, password)
+        
+        if 'error' in result:
+            return jsonify({
+                'status': 'error',
+                'message': result['error']
+            }), 401
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Login successful',
+            'data': {
+                'user_id': result['user_id'],
+                'username': result['username'],
+                'email': result['email']
+            },
+            'token': result['token']
+        })
+        
+    except Exception as e:
+        logger.error(f"Login endpoint error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Login failed'
         }), 500
 
 if __name__ == '__main__':

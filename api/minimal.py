@@ -416,6 +416,9 @@ Format as a numbered list (1-10)."""
 cerebras_ai = CerebrasAI()
 firebase_auth = FirebaseAuth()
 
+# Global storage for HTML content (in production, use Redis or database)
+html_storage = {}
+
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
@@ -428,6 +431,11 @@ def home():
             'scrape': '/scrape',
             'scrape-complete': '/scrape-complete',
             'scrape-ai': '/scrape-ai',
+            'scrape-self-contained': '/scrape-self-contained',
+            'apply-changes': '/apply-changes',
+            'store-html': '/store-html',
+            'serve-html': '/serve-html/<html_id>',
+            'generate-more-suggestions': '/generate-more-suggestions',
             'register': '/auth/register',
             'login': '/auth/login',
             'change_password': '/auth/change-password',
@@ -857,6 +865,232 @@ def scrape_ai():
         return jsonify({
             'status': 'error',
             'message': f'AI scraping error: {str(e)}'
+        }), 500
+
+@app.route('/scrape-self-contained', methods=['POST'])
+def scrape_self_contained():
+    """
+    Create a completely self-contained HTML file with all resources inlined
+    """
+    try:
+        data = request.get_json()
+        
+        if not data or 'url' not in data:
+            return jsonify({
+                'status': 'error',
+                'message': 'URL is required in request body'
+            }), 400
+        
+        url = data['url']
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Download and inline CSS
+        for link in soup.find_all('link', rel='stylesheet'):
+            if link.get('href'):
+                try:
+                    css_url = requests.compat.urljoin(url, link['href'])
+                    css_response = requests.get(css_url, timeout=15)
+                    if css_response.status_code == 200:
+                        style_tag = soup.new_tag('style')
+                        style_tag.string = css_response.text
+                        link.replace_with(style_tag)
+                except Exception as e:
+                    logger.warning(f"Failed to download CSS: {str(e)}")
+        
+        # Convert small images to data URLs
+        for img in soup.find_all('img', src=True):
+            try:
+                img_url = requests.compat.urljoin(url, img['src'])
+                if not img_url.startswith('data:'):
+                    img_response = requests.get(img_url, timeout=10)
+                    if img_response.status_code == 200 and len(img_response.content) < 500000:
+                        import base64
+                        content_type = img_response.headers.get('content-type', 'image/jpeg')
+                        img_data = base64.b64encode(img_response.content).decode('utf-8')
+                        img['src'] = f"data:{content_type};base64,{img_data}"
+            except Exception as e:
+                logger.warning(f"Failed to process image: {str(e)}")
+        
+        return jsonify({
+            'status': 'success',
+            'data': {
+                'url': url,
+                'html': str(soup),
+                'size': len(str(soup))
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Self-contained scraping error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Processing error: {str(e)}'
+        }), 500
+
+@app.route('/apply-changes', methods=['POST'])
+def apply_changes():
+    """Apply text changes to HTML content"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Request body is required'
+            }), 400
+        
+        html_content = data.get('html')
+        changes = data.get('changes', {})
+        
+        if not html_content:
+            return jsonify({
+                'status': 'error',
+                'message': 'HTML content is required'
+            }), 400
+        
+        modified_html = html_content
+        
+        for element_id, change_data in changes.items():
+            if 'original' in change_data and 'modified' in change_data:
+                original_text = change_data['original']
+                modified_text = change_data['modified']
+                modified_html = modified_html.replace(original_text, modified_text)
+        
+        return jsonify({
+            'status': 'success',
+            'data': {
+                'modified_html': modified_html,
+                'changes_applied': len(changes)
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Failed to apply changes: {str(e)}'
+        }), 500
+
+@app.route('/store-html', methods=['POST'])
+def store_html():
+    """Store HTML content and return an ID"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'html' not in data:
+            return jsonify({
+                'status': 'error',
+                'message': 'HTML content is required'
+            }), 400
+        
+        html_content = data['html']
+        
+        import hashlib
+        import time
+        html_id = hashlib.md5(f"{html_content[:100]}{time.time()}".encode()).hexdigest()
+        
+        html_storage[html_id] = {
+            'html': html_content,
+            'created_at': datetime.now(timezone.utc).isoformat(),
+            'url': data.get('url', ''),
+            'title': data.get('title', '')
+        }
+        
+        return jsonify({
+            'status': 'success',
+            'data': {
+                'html_id': html_id,
+                'serve_url': f'/serve-html/{html_id}'
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Failed to store HTML: {str(e)}'
+        }), 500
+
+@app.route('/serve-html/<path:html_id>', methods=['GET'])
+def serve_html(html_id):
+    """Serve stored HTML with proper headers"""
+    try:
+        if html_id not in html_storage:
+            return jsonify({
+                'status': 'error',
+                'message': 'HTML not found'
+            }), 404
+        
+        stored_data = html_storage[html_id]
+        html_content = stored_data['html']
+        
+        from flask import Response
+        response = Response(html_content, mimetype='text/html')
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        
+        return response
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Failed to serve HTML: {str(e)}'
+        }), 500
+
+@app.route('/generate-more-suggestions', methods=['POST'])
+def generate_more_suggestions():
+    """Generate additional AI suggestions"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Request body is required'
+            }), 400
+        
+        content = data.get('content')
+        content_type = data.get('type', 'headline')
+        context = data.get('context', '')
+        count = min(data.get('count', 10), 20)
+        
+        if not content:
+            return jsonify({
+                'status': 'error',
+                'message': 'Content is required'
+            }), 400
+        
+        ai_result = cerebras_ai.generate_content_suggestions(content, content_type, context)
+        
+        if 'error' in ai_result:
+            return jsonify({
+                'status': 'error',
+                'message': ai_result['error']
+            }), 400
+        
+        suggestions = ai_result.get('suggestions', [])[:count]
+        
+        return jsonify({
+            'status': 'success',
+            'data': {
+                'original_content': content,
+                'content_type': content_type,
+                'suggestions': suggestions,
+                'count': len(suggestions)
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Failed to generate suggestions: {str(e)}'
         }), 500
 
 @app.route('/auth/register', methods=['POST'])

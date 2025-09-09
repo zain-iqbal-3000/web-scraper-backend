@@ -8,7 +8,7 @@ import logging
 import os
 import json
 import base64
-from datetime import datetime
+from datetime import datetime, timezone
 ##hello from saim
 
 def download_and_inline_resources(html_content, base_url):
@@ -256,8 +256,8 @@ CORS(app, origins=['*'], allow_headers=['*'], methods=['*'])
 @app.after_request
 def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
     return response
 
 
@@ -389,7 +389,7 @@ class FirebaseAuth:
             "fields": {
                 "username": {"stringValue": username},
                 "email": {"stringValue": email},
-                "created_at": {"timestampValue": datetime.now(datetime.timezone.utc).isoformat()}
+                "created_at": {"timestampValue": datetime.now(timezone.utc).isoformat()}
             }
         }
         
@@ -1262,7 +1262,7 @@ class WebScraper:
             
             # Add metadata
             enhanced_data['ai_enhanced'] = True
-            enhanced_data['processing_timestamp'] = datetime.utcnow().isoformat() + "Z"
+            enhanced_data['processing_timestamp'] = datetime.now(timezone.utc).isoformat()
             
             return enhanced_data
             
@@ -1569,7 +1569,7 @@ class WebScraper:
             
             # Add metadata
             enhanced_data['ai_enhanced'] = True
-            enhanced_data['processing_timestamp'] = datetime.utcnow().isoformat() + "Z"
+            enhanced_data['processing_timestamp'] = datetime.now(timezone.utc).isoformat()
             
             return enhanced_data
             
@@ -1581,6 +1581,10 @@ class WebScraper:
 scraper = WebScraper()
 firebase_auth = FirebaseAuth()
 cerebras_ai = CerebrasAI()
+
+@app.route('/health', methods=['GET'])
+def simple_health():
+    return jsonify({"status": "ok", "message": "API is running"})
 
 @app.route('/', methods=['GET'])
 def health_check():
